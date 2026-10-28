@@ -15,12 +15,8 @@
 `prank-rs` (in [`rust/`](rust/)) is a Rust port of the P2Rank `predict` command for the default
 config and model. This page compares the speed of the unchanged Java P2Rank with the three
 `prank-rs` modes and summarizes their accuracy. For the full documentation see
-[`rust/README.md`](rust/README.md).
-
-> [!NOTE]
-> This repository is a fork of [P2Rank](https://github.com/rdk/p2rank) and still contains the
-> Java P2Rank sources. For the original P2Rank README (usage, algorithm, publications) see
-> [`README-P2Rank.md`](README-P2Rank.md).
+[`rust/README.md`](rust/README.md); the original P2Rank README is
+[`README-P2Rank.md`](README-P2Rank.md).
 
 | Mode | What it does |
 |---|---|
