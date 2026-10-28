@@ -50,3 +50,6 @@ misc/test-scripts/bench-results.csv
 
 # prank-rs model cache (generated from model.zst)
 *.flb
+
+# local Euler container overlay
+.euler-vibe/
