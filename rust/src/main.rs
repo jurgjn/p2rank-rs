@@ -28,14 +28,21 @@ use std::time::Instant;
 
 const VERSION: &str = "2.6-alpha.8";
 
+/// `-mode fast`: random forest early exit. SAS points whose partial ligandability score is below
+/// 0.05 after 10 trees, or below 0.1 after 20 trees (far below the 0.35 pocket threshold), keep the
+/// partial score; all other points get the full 100-tree score.
+const FAST_RF_STAGES: &[(usize, f64)] = &[(10, 0.05), (20, 0.1)];
+
 fn usage() -> ! {
     eprintln!(
         "prank-rs {VERSION} - Rust port of P2Rank `predict` (default model)
 
 usage:
-  prank-rs predict -f <structure.pdb[.gz]> [-o <outdir>] [-threads <n>] [-visualizations 0|1]
-  prank-rs predict <dataset.ds> [-o <outdir>] [-threads <n>] [-visualizations 0|1]
+  prank-rs predict -f <structure> [-o <outdir>] [-mode exact|fast] [-threads <n>] [-visualizations 0|1] [-ccd reduced|full]
+  prank-rs predict <dataset.ds>  [-o <outdir>] [-mode exact|fast] [-threads <n>] [-visualizations 0|1] [-ccd reduced|full]
 
+  -mode exact|fast    exact (default): output byte-identical to Java P2Rank;
+                      fast: faster, small documented differences (see README)
   -ccd reduced|full   chemical component dictionary used for residue classification:
                       reduced (default) = BioJava's bundled fallback set (P2Rank without network),
                       full = complete wwPDB CCD (P2Rank with access to RCSB)
@@ -210,6 +217,7 @@ fn run_predict(args: &[String]) -> Result<(), String> {
     let mut threads: Option<usize> = None;
     let mut visualizations = true;
     let mut full_ccd = false;
+    let mut mode = "exact".to_string();
     let mut i = 0;
     while i < args.len() {
         let a = args[i].as_str();
@@ -221,6 +229,12 @@ fn run_predict(args: &[String]) -> Result<(), String> {
             "-visualizations" => {
                 let v = val()?;
                 visualizations = !(v == "0" || v == "false");
+            }
+            "-mode" => {
+                mode = val()?;
+                if mode != "exact" && mode != "fast" {
+                    return Err(format!("invalid -mode '{}' (exact|fast)", mode));
+                }
             }
             "-ccd" => {
                 full_ccd = match val()?.as_str() {
@@ -249,6 +263,19 @@ fn run_predict(args: &[String]) -> Result<(), String> {
             }
         }
         i += 2;
+    }
+    let fast = mode == "fast";
+    let mut rf_stages: Vec<(usize, f64)> = if fast { FAST_RF_STAGES.to_vec() } else { Vec::new() };
+    // development override, e.g. P2RS_DEV_STAGES="10:0.05,20:0.1"
+    if let Ok(s) = std::env::var("P2RS_DEV_STAGES") {
+        rf_stages = s
+            .split(',')
+            .filter(|x| !x.is_empty())
+            .map(|kv| {
+                let (k, c) = kv.split_once(':').expect("stage k:cutoff");
+                (k.parse().expect("stage k"), c.parse().expect("stage cutoff"))
+            })
+            .collect();
     }
     let install_dir = find_install_dir()?;
     let threads = threads.unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1) + 1);
@@ -288,14 +315,14 @@ fn run_predict(args: &[String]) -> Result<(), String> {
     }
     log.info("FeatureSetup", "effectively enabled features: [chem, volsite, protrusion, bfactor, atom_table]");
     let tr = load_transformers(&install_dir);
-    let cfg = Config { install_dir: install_dir.clone(), threads, visualizations, full_ccd };
+    let cfg = Config { install_dir: install_dir.clone(), threads, visualizations, full_ccd, rf_stages: rf_stages.clone(), fast };
 
     log.info("Dataset", &format!("processing dataset [{}] using {} threads", ds_name, threads));
     let n = items.len();
     // like P2Rank, process dataset items in parallel; a single item uses all threads internally
     let item_threads = if n > 1 { 1 } else { threads };
     let workers = if n > 1 { threads.min(n) } else { 1 };
-    let cfg_item = Config { install_dir: cfg.install_dir.clone(), threads: item_threads, visualizations, full_ccd };
+    let cfg_item = Config { install_dir: cfg.install_dir.clone(), threads: item_threads, visualizations, full_ccd, rf_stages: rf_stages.clone(), fast };
     let next = std::sync::atomic::AtomicUsize::new(0);
     let results: std::sync::Mutex<Vec<(usize, String, pipeline::ItemError)>> = std::sync::Mutex::new(Vec::new());
     std::thread::scope(|sc| {
@@ -379,7 +406,7 @@ fn write_error_reports(outdir: &Path, errors: &[(String, pipeline::ItemError)]) 
         }
         full.push_str("\n\n");
     }
-    let _ = output::write_gzip_java(&outdir.join("errors_full.txt.gz"), full.as_bytes());
+    let _ = output::write_gzip_java(&outdir.join("errors_full.txt.gz"), full.as_bytes(), 6);
 }
 
 fn run_convert_model(args: &[String]) -> Result<(), String> {

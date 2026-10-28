@@ -499,8 +499,14 @@ pub struct FeatureContext {
     pub exposed: PointSet,
     /// per position in `exposed`: index into `atom_vectors` (resolving duplicate PDB serials)
     vec_index: Vec<u32>,
-    atom_vectors: Vec<FVec>,
+    /// non-zero entries of the per-atom feature vectors (CSR): skipping zero entries is exact,
+    /// since adding (+-0.0 * w) to an accumulator that starts at +0.0 never changes it
+    sparse_start: Vec<u32>,
+    sparse: Vec<(u32, f64)>,
     pub deep_layer: PointSet,
+    deep_grid: Option<crate::atoms::CountGrid>,
+    /// fast mode: grid over exposed atoms for the 6 A neighborhood (different summation order)
+    exposed_grid: Option<crate::atoms::CountGrid>,
 }
 
 fn atom_vector(p: &Protein, a: usize) -> FVec {
@@ -522,7 +528,7 @@ fn atom_vector(p: &Protein, a: usize) -> FVec {
 }
 
 impl FeatureContext {
-    pub fn new(p: &Protein, exposed: PointSet, deep_layer: PointSet) -> FeatureContext {
+    pub fn new(p: &Protein, exposed: PointSet, deep_layer: PointSet, fast: bool) -> FeatureContext {
         let mut by_serial: HashMap<i32, u32> = HashMap::new();
         let mut atom_vectors = Vec::with_capacity(exposed.len());
         for (i, &a) in exposed.ids.iter().enumerate() {
@@ -530,28 +536,52 @@ impl FeatureContext {
             by_serial.insert(p.s.atoms[a as usize].serial, i as u32);
         }
         let vec_index = exposed.ids.iter().map(|&a| by_serial[&p.s.atoms[a as usize].serial]).collect();
-        FeatureContext { exposed, vec_index, atom_vectors, deep_layer }
+        let mut sparse_start = vec![0u32];
+        let mut sparse = Vec::new();
+        for v in &atom_vectors {
+            for (k, &x) in v.iter().enumerate() {
+                if x != 0.0 {
+                    sparse.push((k as u32, x));
+                }
+            }
+            sparse_start.push(sparse.len() as u32);
+        }
+        // cell edge = query radius (fastest in benchmarks: few cells per query, cheap boundary scans)
+        let deep_grid = crate::atoms::CountGrid::new(&deep_layer.pts, 10.0);
+        let exposed_grid = if fast { crate::atoms::CountGrid::new(&exposed.pts, 6.0) } else { None };
+        FeatureContext { exposed, vec_index, sparse_start, sparse, deep_layer, deep_grid, exposed_grid }
     }
 
     /// PrankFeatureExtractor.calcFeatureVector for a SAS point
     pub fn sas_vector(&self, point: &P3, scratch: &mut Vec<u32>) -> FVec {
-        self.exposed.cutout_sphere_idx(point, 6.0, scratch);
+        match &self.exposed_grid {
+            Some(g) => {
+                scratch.clear();
+                g.for_each_within(point, 6.0, |i| scratch.push(i));
+            }
+            None => self.exposed.cutout_sphere_idx(point, 6.0, scratch),
+        }
         let mut res = [0.0f64; NUM_FEATURES];
         for &i in scratch.iter() {
             let i = i as usize;
-            let props = &self.atom_vectors[self.vec_index[i] as usize];
+            let v = self.vec_index[i] as usize;
+            let props = &self.sparse[self.sparse_start[v] as usize..self.sparse_start[v + 1] as usize];
             let a = &self.exposed.pts[i];
             let x = point[0] - a[0];
             let y = point[1] - a[1];
             let z = point[2] - a[2];
             let d = (x * x + y * y + z * z).sqrt();
             let weight = 1.0 - d / 6.0;
-            for k in 0..NUM_FEATURES {
-                res[k] += props[k] * weight;
+            for &(k, x) in props {
+                res[k as usize] += x * weight;
             }
         }
         res[IDX_CHEM_ATOMS] = scratch.len() as f64;
-        res[IDX_PROTRUSION] = self.deep_layer.count_within_sphere(point, 10.0) as f64;
+        // protrusion: an order-independent count, so an exact grid count replaces the kd-tree query
+        res[IDX_PROTRUSION] = match &self.deep_grid {
+            Some(g) => g.count_within(point, 10.0),
+            None => self.deep_layer.count_within_sphere(point, 10.0),
+        } as f64;
         res
     }
 }

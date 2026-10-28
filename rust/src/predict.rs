@@ -254,11 +254,48 @@ pub struct ResidueRow {
     pub pocket: i32,
 }
 
+/// Fast mode residue scores: every point's transformed score is scattered to the residues with a
+/// heavy atom within the radius. Same point/residue membership as the exact path, but the sums
+/// are accumulated in a different order (last-bit floating point differences).
+fn residue_scores_scatter(p: &Protein, points: &[LabeledPoint], radius: f64) -> Vec<f64> {
+    let mut atom_pts = Vec::new();
+    let mut atom_res = Vec::new();
+    for (ri, r) in p.residues.iter().enumerate() {
+        for a in p.residue_heavy_atoms(r) {
+            atom_pts.push(p.atom_pos(a));
+            atom_res.push(ri as u32);
+        }
+    }
+    let mut scores = vec![0.0f64; p.residues.len()];
+    let grid = match crate::atoms::CountGrid::new_indexed(&atom_pts, radius) {
+        Some(g) => g,
+        None => return scores,
+    };
+    let mut hit: Vec<u32> = Vec::new();
+    for lp in points {
+        let t = transform_point_score(lp.score);
+        hit.clear();
+        grid.for_each_within(&lp.pos, radius, |i| {
+            let r = atom_res[i as usize];
+            if !hit.contains(&r) {
+                hit.push(r);
+            }
+        });
+        for &r in &hit {
+            scores[r as usize] += t;
+        }
+    }
+    scores
+}
+
 /// ResidueLabelings.calculate: per residue score, zscore, probability and pocket reference
-pub fn label_residues(p: &Protein, points: &[LabeledPoint], all_points: &PointSet, pockets: &[Pocket], tr: &Transformers) -> Vec<ResidueRow> {
+pub fn label_residues(p: &Protein, points: &[LabeledPoint], all_points: &PointSet, pockets: &[Pocket], tr: &Transformers, fast: bool) -> Vec<ResidueRow> {
     let radius = (1.6f64 + 2.5f64) + 2.0f64;
     let mut scores: Vec<f64> = Vec::with_capacity(p.residues.len());
-    for r in &p.residues {
+    if fast {
+        scores = residue_scores_scatter(p, points, radius);
+    }
+    for r in p.residues.iter().filter(|_| !fast) {
         let atoms = p.residue_heavy_atoms(r);
         let res_set = p.point_set(&atoms);
         let shell = all_points.cutout_shell(&res_set, radius);

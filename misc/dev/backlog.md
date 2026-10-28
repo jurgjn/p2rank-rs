@@ -22,6 +22,14 @@ behaviour — kept in the file so they don't get re-raised.
 
 ## Real bugs (conditional / non-default paths)
 
+- **`P2RankLoader` reads pocket centers from the wrong columns.**
+  `P2RankLoader.loadPockets` takes the center from `cols[5..7]`, but the current
+  `*_predictions.csv` layout (`name, rank, score, probability, sas_points,
+  surf_atoms, center_x, center_y, center_z, ...`) has it in `cols[6..8]`, so
+  `PREDICTION_METHOD=p2rank` datasets (e.g. `coach420-p2rank.ds`) get centers
+  `(surf_atoms, center_x, center_y)`. Found while evaluating `rust/` predictions;
+  `rust/tools/eval_predictions.py` works around it with an adapter CSV.
+
 - **Coulomb plumbing is dead code.** `EnergyCalculator.getAtomCharge` always
   returns 0 (`EnergyCalculator.groovy:351-357`). `enableCoulomb`,
   `dielectricConstant`, `coulombConstant` are structurally inert.

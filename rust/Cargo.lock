@@ -78,6 +78,7 @@ dependencies = [
  "libz-sys",
  "memmap2",
  "ruzstd",
+ "ryu",
 ]
 
 [[package]]
@@ -94,6 +95,12 @@ checksum = "69e4ce4a039f42bf25920b95667e4d789e98749ab11bbb8d2c2936f788421bb5"
 dependencies = [
  "twox-hash",
 ]
+
+[[package]]
+name = "ryu"
+version = "1.0.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
 name = "shlex"

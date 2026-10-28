@@ -15,6 +15,10 @@ pub struct Config {
     pub visualizations: bool,
     /// use the full CCD (BioJava online behaviour) instead of BioJava's reduced fallback set
     pub full_ccd: bool,
+    /// random forest early-exit stages (empty = exact)
+    pub rf_stages: Vec<(usize, f64)>,
+    /// fast mode (approximations allowed)
+    pub fast: bool,
 }
 
 pub struct Log {
@@ -130,6 +134,42 @@ fn parallel_map_blocks<T: Sync, R: Send>(items: &[T], threads: usize, f: impl Fn
     });
     slots.into_iter().map(|m| m.into_inner().unwrap().unwrap()).collect()
 }
+
+/// Fast mode, after the early-exit cascade: early-stopped points near (likely) ligandable points
+/// get the full forest score, repeated until stable, so pocket regions are scored exactly. Only
+/// background points far from any pocket keep their partial (early-exit) score.
+fn refine_fast_scores(sas: &[[f64; 3]], vectors: &[V], sc: &mut [f64], used: &mut [u16], forest: &Forest, cfg: &Config) {
+    let full = forest.num_trees as u16;
+    loop {
+        let hi: Vec<[f64; 3]> = (0..sas.len()).filter(|&i| sc[i] >= FAST_REFINE_SCORE).map(|i| sas[i]).collect();
+        let grid = match crate::atoms::CountGrid::new(&hi, FAST_REFINE_RADIUS) {
+            Some(g) => g,
+            None => break,
+        };
+        let todo: Vec<usize> = (0..sas.len()).filter(|&i| used[i] < full && grid.any_within(&sas[i], FAST_REFINE_RADIUS)).collect();
+        if todo.is_empty() {
+            break;
+        }
+        let blocks: Vec<&[usize]> = todo.chunks(256).collect();
+        let res: Vec<Vec<f64>> = parallel_map_blocks(&blocks, cfg.threads, |b| {
+            let xs: Vec<&[f64]> = b.iter().map(|&i| &vectors[i].0[..]).collect();
+            let mut out = vec![0.0f64; b.len()];
+            forest.predict_block_cascade(&xs, &[], &mut out);
+            out
+        });
+        for (b, r) in blocks.iter().zip(res) {
+            for (&i, v) in b.iter().zip(r) {
+                sc[i] = v;
+                used[i] = full;
+            }
+        }
+    }
+}
+
+/// points with at least this (partial or full) score trigger exact rescoring of their neighbors
+const FAST_REFINE_SCORE: f64 = 0.2;
+/// neighborhood radius for exact rescoring (covers pocket extension and clustering distances)
+const FAST_REFINE_RADIUS: f64 = 4.0;
 
 #[derive(Clone, Copy)]
 struct V(FVec);
@@ -277,7 +317,8 @@ pub fn predict_file(item: &Item, outdir: &Path, cfg: &Config, forest: &Forest, t
         deep.kd();
     }
     tick("exposed+deep");
-    let ctx = FeatureContext::new(&p, exposed, deep);
+    let ctx = FeatureContext::new(&p, exposed, deep, cfg.fast);
+
     if ctx.exposed.len() >= crate::atoms::USE_KDTREE_CUTOUT_SPHERE_THRESHOLD {
         ctx.exposed.kd();
     }
@@ -289,13 +330,22 @@ pub fn predict_file(item: &Item, outdir: &Path, cfg: &Config, forest: &Forest, t
         // classify in blocks (tree-major traversal keeps each tree cache resident)
         const BLOCK: usize = 256;
         let blocks: Vec<&[V]> = vectors.chunks(BLOCK).collect();
-        let block_scores: Vec<Vec<f64>> = parallel_map_blocks(&blocks, cfg.threads, |b| {
+        let block_scores: Vec<(Vec<f64>, Vec<u16>)> = parallel_map_blocks(&blocks, cfg.threads, |b| {
             let xs: Vec<&[f64]> = b.iter().map(|v| &v.0[..]).collect();
             let mut out = vec![0.0f64; b.len()];
-            forest.predict_block(&xs, &mut out);
-            out
+            let used = forest.predict_block_cascade(&xs, &cfg.rf_stages, &mut out);
+            (out, used)
         });
-        block_scores.into_iter().flatten().collect()
+        let mut sc: Vec<f64> = Vec::with_capacity(sas.len());
+        let mut used: Vec<u16> = Vec::with_capacity(sas.len());
+        for (o, u) in block_scores {
+            sc.extend(o);
+            used.extend(u);
+        }
+        if !cfg.rf_stages.is_empty() {
+            refine_fast_scores(&sas, &vectors, &mut sc, &mut used, forest, cfg);
+        }
+        sc
     };
     tick("features+rf");
     let mut points: Vec<LabeledPoint> = sas
@@ -339,12 +389,12 @@ pub fn predict_file(item: &Item, outdir: &Path, cfg: &Config, forest: &Forest, t
         let data = vis.join("data");
         std::fs::create_dir_all(&data).map_err(|e| ItemError::new("IOException", format!("cannot create {}: {}", data.display(), e)))?;
         let pts_text = output::points_pdb(points, cfg.threads);
-        output::write_gzip_java(&vis.join(&points_rel), pts_text.as_bytes())
+        output::write_gzip_java(&vis.join(&points_rel), pts_text.as_bytes(), if cfg.fast { 1 } else { 6 })
             .map_err(|e| ItemError::new("IOException", format!("cannot write points: {}", e)))
     };
     let (points_res, residue_rows) = std::thread::scope(|sc| {
         let h = sc.spawn(|| points_job(&points));
-        let rows = predict::label_residues(&p, &points, &all_points, &pockets, tr);
+        let rows = predict::label_residues(&p, &points, &all_points, &pockets, tr, cfg.fast);
         (h.join().unwrap(), rows)
     });
     points_res?;

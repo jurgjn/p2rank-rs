@@ -13,6 +13,7 @@ flate2 = { version = "1", default-features = false, features = ["zlib"] }
 libz-sys = { version = "1", default-features = false, features = ["static", "libc"] }
 memmap2 = "0.9.12"
 ruzstd = "0.9.1"
+ryu = "1.0.23"
 
 [profile.release]
 opt-level = 3

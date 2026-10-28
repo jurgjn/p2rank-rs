@@ -64,13 +64,78 @@ pub fn compute_surface_points(centers: &[P3], vdw: &[f64], solvent_radius: f64, 
         }
     }
 
-    // uniform cell grid with edge >= any (ri + rj), so all neighbors are in adjacent cells
-    let cell = 2.0 * (max_radius + solvent_radius);
-    let key = |p: &P3| -> (i64, i64, i64) { ((p[0] / cell).floor() as i64, (p[1] / cell).floor() as i64, (p[2] / cell).floor() as i64) };
-    let mut cells: std::collections::HashMap<(i64, i64, i64), Vec<u32>> = std::collections::HashMap::new();
-    for (i, p) in centers.iter().enumerate() {
-        cells.entry(key(p)).or_default().push(i as u32);
+    // dense uniform cell grid (CSR layout); edge = max(ri + rj) so all neighbors are in adjacent cells.
+    // The neighbor *set* is what matters (the buried test is an "any" predicate), so the grid
+    // geometry does not influence results.
+    let cell = (2.0 * max_radius).max(1e-6);
+    let mut lo = [f64::INFINITY; 3];
+    for p in centers {
+        for k in 0..3 {
+            lo[k] = lo[k].min(p[k]);
+        }
     }
+    let cidx = |p: &P3, k: usize| -> i64 { ((p[k] - lo[k]) / cell).floor() as i64 };
+    let mut dims = [1i64; 3];
+    for p in centers {
+        for k in 0..3 {
+            dims[k] = dims[k].max(cidx(p, k) + 1);
+        }
+    }
+    let use_dense = n > 0 && centers.iter().all(|p| p.iter().all(|v| v.is_finite())) && dims[0] * dims[1] * dims[2] <= (64 * n as i64).max(1 << 20);
+    let ncell = if use_dense { (dims[0] * dims[1] * dims[2]) as usize } else { 0 };
+    let cell_of = |p: &P3| -> usize { ((cidx(p, 2) * dims[1] + cidx(p, 1)) * dims[0] + cidx(p, 0)) as usize };
+    let mut cell_start = vec![0u32; ncell + 1];
+    let mut cell_atoms = vec![0u32; if use_dense { n } else { 0 }];
+    let mut hashed: std::collections::HashMap<(i64, i64, i64), Vec<u32>> = std::collections::HashMap::new();
+    if use_dense {
+        for p in centers {
+            cell_start[cell_of(p) + 1] += 1;
+        }
+        for c in 0..ncell {
+            cell_start[c + 1] += cell_start[c];
+        }
+        let mut cursor = cell_start.clone();
+        for (i, p) in centers.iter().enumerate() {
+            let c = cell_of(p);
+            cell_atoms[cursor[c] as usize] = i as u32;
+            cursor[c] += 1;
+        }
+    } else {
+        // fallback for sparse / non-finite coordinates
+        let key = |p: &P3| -> (i64, i64, i64) { ((p[0] / cell).floor() as i64, (p[1] / cell).floor() as i64, (p[2] / cell).floor() as i64) };
+        for (i, p) in centers.iter().enumerate() {
+            hashed.entry(key(p)).or_default().push(i as u32);
+        }
+    }
+    let for_candidates = |i: usize, f: &mut dyn FnMut(usize)| {
+        let p = &centers[i];
+        if use_dense {
+            let (cx, cy, cz) = (cidx(p, 0), cidx(p, 1), cidx(p, 2));
+            for z in (cz - 1).max(0)..=(cz + 1).min(dims[2] - 1) {
+                for y in (cy - 1).max(0)..=(cy + 1).min(dims[1] - 1) {
+                    let row = (z * dims[1] + y) * dims[0];
+                    let c0 = (row + (cx - 1).max(0)) as usize;
+                    let c1 = (row + (cx + 1).min(dims[0] - 1)) as usize;
+                    for &j in &cell_atoms[cell_start[c0] as usize..cell_start[c1 + 1] as usize] {
+                        f(j as usize);
+                    }
+                }
+            }
+        } else {
+            let k = ((p[0] / cell).floor() as i64, (p[1] / cell).floor() as i64, (p[2] / cell).floor() as i64);
+            for dx in -1..=1 {
+                for dy in -1..=1 {
+                    for dz in -1..=1 {
+                        if let Some(list) = hashed.get(&(k.0 + dx, k.1 + dy, k.2 + dz)) {
+                            for &j in list {
+                                f(j as usize);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    };
 
     let atom_points = |i: usize, out: &mut Vec<P3>, nb: &mut Vec<(f64, f64, f64, f64)>| {
         let total_radius = radius[i];
@@ -78,29 +143,19 @@ pub fn compute_surface_points(centers: &[P3], vdw: &[f64], solvent_radius: f64, 
         let twice = 2.0 * total_radius;
         let (ax, ay, az) = (centers[i][0], centers[i][1], centers[i][2]);
         nb.clear();
-        let (kx, ky, kz) = key(&centers[i]);
-        for dx in -1..=1 {
-            for dy in -1..=1 {
-                for dz in -1..=1 {
-                    if let Some(list) = cells.get(&(kx + dx, ky + dy, kz + dz)) {
-                        for &j in list {
-                            let j = j as usize;
-                            if j == i {
-                                continue;
-                            }
-                            let x12 = centers[j][0] - ax;
-                            let y12 = centers[j][1] - ay;
-                            let z12 = centers[j][2] - az;
-                            let d2 = x12 * x12 + y12 * y12 + z12 * z12;
-                            let sum_r = radius[i] + radius[j];
-                            if d2 < sum_r * sum_r {
-                                nb.push((x12, y12, z12, (d2 + total_radius2 - radius2[j]) / twice));
-                            }
-                        }
-                    }
-                }
+        for_candidates(i, &mut |j| {
+            if j == i {
+                return;
             }
-        }
+            let x12 = centers[j][0] - ax;
+            let y12 = centers[j][1] - ay;
+            let z12 = centers[j][2] - az;
+            let d2 = x12 * x12 + y12 * y12 + z12 * z12;
+            let sum_r = radius[i] + radius[j];
+            if d2 < sum_r * sum_r {
+                nb.push((x12, y12, z12, (d2 + total_radius2 - radius2[j]) / twice));
+            }
+        });
         let mut last: Option<usize> = None;
         for d in 0..dirs.dx.len() {
             let px = dirs.dx[d];

@@ -9,11 +9,32 @@ fn shortest_digits(v: f64) -> (Vec<u8>, i32) {
     if v == 0.0 {
         return (vec![b'0'], 1);
     }
-    let s = format!("{:e}", v);
-    let (mant, exp) = s.split_once('e').unwrap();
-    let exp: i32 = exp.parse().unwrap();
-    let digits: Vec<u8> = mant.bytes().filter(|c| c.is_ascii_digit()).collect();
-    (digits, exp + 1)
+    // ryu: shortest round-trip digits, e.g. "1.0005", "123.0", "1e-7", "1.5e20"
+    let mut buf = ryu::Buffer::new();
+    let s = buf.format_finite(v).as_bytes();
+    let mut digits: Vec<u8> = Vec::with_capacity(20);
+    let mut point: Option<i32> = None;
+    let mut exp: i32 = 0;
+    let mut i = 0;
+    while i < s.len() {
+        match s[i] {
+            b'.' => point = Some(digits.len() as i32),
+            b'e' | b'E' => {
+                exp = std::str::from_utf8(&s[i + 1..]).unwrap().parse().unwrap();
+                break;
+            }
+            c => digits.push(c),
+        }
+        i += 1;
+    }
+    let int_len = point.unwrap_or(digits.len() as i32);
+    // strip leading zeros (adjusting the decimal exponent) and trailing zeros
+    let lead = digits.iter().take_while(|&&c| c == b'0').count();
+    digits.drain(..lead);
+    while digits.len() > 1 && *digits.last().unwrap() == b'0' {
+        digits.pop();
+    }
+    (digits, int_len - lead as i32 + exp)
 }
 
 fn is_negative(x: f64) -> bool {

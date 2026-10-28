@@ -285,9 +285,10 @@ fn points_pdb_range(points: &[LabeledPoint], from: usize, to: usize) -> String {
 }
 
 /// Writes gzip exactly like java.util.zip.GZIPOutputStream (default level, zlib deflate)
-pub fn write_gzip_java(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
+/// (`level` 6 = Deflater.DEFAULT_COMPRESSION, as in P2Rank)
+pub fn write_gzip_java(path: &std::path::Path, data: &[u8], level: u32) -> std::io::Result<()> {
     let mut out: Vec<u8> = vec![0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 0xff];
-    let mut enc = flate2::write::DeflateEncoder::new(Vec::with_capacity(data.len() / 4), flate2::Compression::new(6));
+    let mut enc = flate2::write::DeflateEncoder::new(Vec::with_capacity(data.len() / 4), flate2::Compression::new(level));
     enc.write_all(data)?;
     let body = enc.finish()?;
     out.extend_from_slice(&body);

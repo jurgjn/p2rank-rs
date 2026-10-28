@@ -161,27 +161,19 @@ impl Forest {
         res
     }
 
-    /// LegacyFlatBinaryForest.predictForBatch over a block of instances: tree-major traversal,
-    /// several instances advanced in lockstep. Per-instance sums are accumulated in tree order,
-    /// exactly as in Java.
-    pub fn predict_block(&self, xs: &[&[f64]], out: &mut [f64]) {
+    /// Accumulates the class sums of trees `trees` for the instances `idx` (tree-major; each lane
+    /// walks one instance, refilled with the next pending instance when it reaches a leaf).
+    fn accumulate(&self, xs: &[&[f64]], idx: &[usize], trees: std::ops::Range<usize>, s0: &mut [f64], s1: &mut [f64]) {
         const LANES: usize = 16;
-        let n = xs.len();
-        let mut s0 = vec![0.0f64; n];
-        let mut s1 = vec![0.0f64; n];
+        let n = idx.len();
         let nodes = self.nodes();
         let leaves = self.leaves();
-        for x in xs {
-            assert!(x.len() + 1 >= self.num_attributes, "feature vector too short for model");
-        }
-        for t in 0..self.num_trees {
-            // each lane walks one instance; when it reaches a leaf it continues with the next
-            // pending instance, so all lanes stay busy (independent loads overlap)
+        for t in trees {
             let mut lane_pt = [0usize; LANES];
             let mut lane_node = [t as i32; LANES];
             let mut active = LANES.min(n);
             for l in 0..active {
-                lane_pt[l] = l;
+                lane_pt[l] = idx[l];
             }
             let mut next_pt = active;
             while active > 0 {
@@ -197,11 +189,10 @@ impl Forest {
                         s0[i] += p[0];
                         s1[i] += p[1];
                         if next_pt < n {
-                            lane_pt[l] = next_pt;
+                            lane_pt[l] = idx[next_pt];
                             lane_node[l] = t as i32;
                             next_pt += 1;
                         } else {
-                            // retire the lane: move the last active lane here
                             active -= 1;
                             lane_pt[l] = lane_pt[active];
                             lane_node[l] = lane_node[active];
@@ -214,10 +205,46 @@ impl Forest {
                 }
             }
         }
-        for i in 0..n {
-            // NormalizationUtils.normalizedProb
-            let sum = s0[i] + s1[i];
-            out[i] = if sum == 0.0 { 0.0 } else { s1[i] / sum };
+    }
+
+    /// LegacyFlatBinaryForest.predictForBatch over a block of instances, optionally with early exit (fast mode): after `k` trees, instances whose
+    /// partial score is below `cutoff` keep that partial score; `stages` = [(k, cutoff), ...].
+    /// Instances that pass all stages get exactly the full-forest score.
+    /// Returns, for each instance, the number of trees used (num_trees if not stopped early).
+    pub fn predict_block_cascade(&self, xs: &[&[f64]], stages: &[(usize, f64)], out: &mut [f64]) -> Vec<u16> {
+        let n = xs.len();
+        for x in xs {
+            assert!(x.len() + 1 >= self.num_attributes, "feature vector too short for model");
         }
+        let mut s0 = vec![0.0f64; n];
+        let mut s1 = vec![0.0f64; n];
+        let norm = |a: f64, b: f64| if a + b == 0.0 { 0.0 } else { b / (a + b) };
+        let mut alive: Vec<usize> = (0..n).collect();
+        let mut used = vec![self.num_trees as u16; n];
+        let mut done_trees = 0;
+        for &(k, cutoff) in stages {
+            let k = k.min(self.num_trees);
+            if k <= done_trees {
+                continue;
+            }
+            self.accumulate(xs, &alive, done_trees..k, &mut s0, &mut s1);
+            done_trees = k;
+            alive.retain(|&i| {
+                let p = norm(s0[i], s1[i]);
+                if p < cutoff {
+                    out[i] = p;
+                    used[i] = k as u16;
+                    false
+                } else {
+                    true
+                }
+            });
+        }
+        self.accumulate(xs, &alive, done_trees..self.num_trees, &mut s0, &mut s1);
+        for &i in &alive {
+            // NormalizationUtils.normalizedProb
+            out[i] = norm(s0[i], s1[i]);
+        }
+        used
     }
 }
