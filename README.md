@@ -1,5 +1,17 @@
 # p2rank-rs
 
+> (Human-written text starts)
+>
+> This is an exercise in assessing the bioinformatics capabilities of agentic AI. It is part of a hackathon run by the Beltrao lab at ETH Zurich, where we used Claude to run bioinformatics projects (https://github.com/evocellnet/ai-hackathon/). All results in this project were generated entirely by AI with minimal human intervention. This is not intended to be viewed as a traditional publication and bioinformatics tool.
+>
+> The goal of this specific project was to port the P2Rank ligand-binding site prediction tool (`predict` command) from Java to Rust, with output byte-identical to the original, and then to add faster modes that trade small, documented amounts of accuracy for speed. It was executed by Claude Opus 5.5 with delegation to Opus 5.5 subagents.
+>
+> Currently none of the results have been verified by a human. We plan to verify the agent's methodology and benchmarking, and we will update this section accordingly.
+>
+> This repository is a fork of P2Rank: the Java P2Rank code is the original, human-written project. The Rust port in `rust/` and this README (a benchmark and accuracy report) are entirely AI generated.
+>
+> (Human-written text ends)
+
 `prank-rs` (in [`rust/`](rust/)) is a Rust port of the P2Rank `predict` command for the default
 config and model. This page compares the speed of the unchanged Java P2Rank with the three
 `prank-rs` modes and summarizes their accuracy. For the full documentation see
