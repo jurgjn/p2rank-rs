@@ -20,8 +20,8 @@ P2RANK_HOME=../distro target/release/prank-rs predict -f ../distro/test_data/1fb
 ## Usage
 
 ```
-prank-rs predict -f <structure> [-o <outdir>] [-mode exact|fast|faster] [-threads <n>] [-visualizations 0|1] [-ccd reduced|full]
-prank-rs predict <dataset.ds>  [-o <outdir>] [-mode exact|fast|faster] [-threads <n>] [-visualizations 0|1] [-ccd reduced|full]
+prank-rs predict -f <structure> [-o <outdir>] [-mode exact|fast|faster] [-threads <n>] [-visualizations 0|1] [-descriptors 0|1] [-ccd reduced|full]
+prank-rs predict <dataset.ds>  [-o <outdir>] [-mode exact|fast|faster] [-threads <n>] [-visualizations 0|1] [-descriptors 0|1] [-ccd reduced|full]
 prank-rs convert-model [<model_dir>]
 ```
 
@@ -165,6 +165,50 @@ results depend on which one it gets:
 > The two modes give different results for structures with nonstandard residues: 20 of the 4009
 > holo4k structures differ. This is a property of the Java P2Rank (see `misc/dev/backlog.md`);
 > `prank-rs` reproduces either behaviour exactly.
+
+## Pocket descriptors (`-descriptors 1`)
+
+With `-descriptors 1`, `prank-rs` also writes `<label>_pockets_descriptors.csv`: one row per
+pocket (same names and ranks as `predictions.csv`) with cheap global properties of the kind used
+by pocket fingerprints and druggability models. All other output files stay the same (byte-identical
+to Java in `exact` mode), and the extra CPU time is under 1%.
+
+| Column | Meaning | Inspired by |
+|---|---|---|
+| `residues` | residues lining the pocket | fpocket |
+| `rgyr` | radius of gyration of the pocket SAS points (A) | DoGSiteScorer (size) |
+| `axis1`, `axis2`, `axis3` | spread along the principal axes of the pocket points (A, largest first) | DoGSiteScorer (ellipsoid shape) |
+| `shape` | `tunnel` (axis1/axis2 >= 1.8), `saucer` (axis2/axis3 >= 1.8) or `bowl` | |
+| `buriedness` | mean number of buried protein atoms within 10 A of the pocket points (P2Rank's protrusion feature) | buriedness / depth |
+| `aromatic`, `cation`, `anion`, `hydrophobic`, `acceptor`, `donor` | fraction of the pocket surface atoms with each VolSite pharmacophore property | FuzCav, VolSite |
+| `polar_atoms` | fraction of N and O surface atoms | fpocket |
+| `hydropathy` | mean Kyte-Doolittle hydropathy of the pocket residues | fpocket, DoGSiteScorer |
+| `net_charge` | ARG + LYS - ASP - GLU over the pocket residues | fpocket |
+| `bfactor` | mean B-factor of the surface atoms (flexibility; pLDDT for AlphaFold models) | |
+| `score_max`, `score_mean` | max and mean ligandability score of the pocket points scoring >= 0.35 | |
+| `flavour` | the pharmacophore property most enriched over an average pocket (z-score >= 1): `aromatic`, `basic`, `acidic`, `greasy`, `acceptor-rich`, `donor-rich`, else `balanced` | |
+
+The `shape` thresholds (upper quartile of each axis ratio) and the means and SDs behind `flavour`
+were computed on the 3575 pockets predicted on ah4h, a dataset used neither for training nor for
+evaluation. There, about half the pockets are bowls and a quarter tunnels; a third are `balanced`.
+
+> [!NOTE]
+> These are descriptors, not predictions: none of them feeds back into pocket scores or ranks. On
+> ah4h, the P2Rank pocket probability tracks size (Spearman 0.85-0.87 with `residues` and `rgyr`)
+> and somewhat buriedness (0.26), but hardly the pharmacophore composition (|rho| <= 0.12).
+
+Example (`1fbl`, a matrix metalloproteinase; pocket 1 is the S1' pocket next to the catalytic zinc):
+
+```
+name, rank, residues, rgyr, axis1, axis2, axis3, shape, buriedness, aromatic, cation, anion, hydrophobic, acceptor, donor, polar_atoms, hydropathy, net_charge, bfactor, score_max, score_mean, flavour
+pocket1, 1, 18, 5.42, 4.79, 1.96, 1.60, tunnel, 136.4, 0.175, 0.000, 0.050, 0.325, 0.350, 0.300, 0.500, -1.13, 0, 21.3, 0.929, 0.613, donor-rich
+```
+
+References: fpocket ([Le Guilloux et al. 2009](https://doi.org/10.1186/1471-2105-10-168)),
+DoGSiteScorer ([Volkamer et al. 2012](https://doi.org/10.1021/ci200454v)), FuzCav
+([Weill and Rognan 2010](https://doi.org/10.1021/ci900349y)), PocketMatch
+([Yeturu and Chandra 2008](https://doi.org/10.1186/1471-2105-9-543)), and the ProSPECCTs benchmark
+of binding site comparison ([Ehrt et al. 2018](https://doi.org/10.1371/journal.pcbi.1006483)).
 
 ## What is identical
 

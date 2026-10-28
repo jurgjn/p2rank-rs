@@ -21,6 +21,8 @@ pub struct Config {
     pub fast: bool,
     /// faster mode (implies fast): score a sparse subset of SAS points, fill in near pockets
     pub faster: Option<FasterParams>,
+    /// also write per-pocket descriptors (`<label>_pockets_descriptors.csv`)
+    pub descriptors: bool,
 }
 
 /// `-mode faster` parameters (see `faster_scores`)
@@ -612,6 +614,9 @@ pub fn predict_file(item: &Item, outdir: &Path, cfg: &Config, forest: &Forest, t
     };
     w(format!("{}_predictions.csv", label), output::predictions_csv(&p, &pockets))?;
     w(format!("{}_residues.csv", label), output::residues_csv(&p, &residue_rows))?;
+    if cfg.descriptors {
+        w(format!("{}_pockets_descriptors.csv", label), crate::descriptors::csv(&p, &pockets, &points, &ctx))?;
+    }
 
     if cfg.visualizations {
         let data = vis.join("data");

@@ -4,6 +4,7 @@
 mod atoms;
 mod bcif;
 mod chemcomp;
+mod descriptors;
 mod cif;
 mod elements;
 mod elements_data;
@@ -65,13 +66,15 @@ fn usage() -> ! {
         "prank-rs {VERSION} - Rust port of P2Rank `predict` (default model)
 
 usage:
-  prank-rs predict -f <structure> [-o <outdir>] [-mode exact|fast|faster] [-threads <n>] [-visualizations 0|1] [-ccd reduced|full]
-  prank-rs predict <dataset.ds>  [-o <outdir>] [-mode exact|fast|faster] [-threads <n>] [-visualizations 0|1] [-ccd reduced|full]
+  prank-rs predict -f <structure> [-o <outdir>] [-mode exact|fast|faster] [-threads <n>] [-visualizations 0|1] [-descriptors 0|1] [-ccd reduced|full]
+  prank-rs predict <dataset.ds>  [-o <outdir>] [-mode exact|fast|faster] [-threads <n>] [-visualizations 0|1] [-descriptors 0|1] [-ccd reduced|full]
 
   -mode exact|fast|faster
                       exact (default): output byte-identical to Java P2Rank;
                       fast: faster, small documented differences (see README);
                       faster: faster still, scores only part of the surface (see README)
+  -descriptors 0|1    also write per-pocket descriptors (shape, buriedness, pharmacophore
+                      composition, hydropathy, charge, ...) to <label>_pockets_descriptors.csv
   -ccd reduced|full   chemical component dictionary used for residue classification:
                       reduced (default) = BioJava's bundled fallback set (P2Rank without network),
                       full = complete wwPDB CCD (P2Rank with access to RCSB)
@@ -246,6 +249,7 @@ fn run_predict(args: &[String]) -> Result<(), String> {
     let mut threads: Option<usize> = None;
     let mut visualizations = true;
     let mut full_ccd = false;
+    let mut descriptors = false;
     let mut mode = "exact".to_string();
     let mut i = 0;
     while i < args.len() {
@@ -264,6 +268,10 @@ fn run_predict(args: &[String]) -> Result<(), String> {
                 if mode != "exact" && mode != "fast" && mode != "faster" {
                     return Err(format!("invalid -mode '{}' (exact|fast|faster)", mode));
                 }
+            }
+            "-descriptors" => {
+                let v = val()?;
+                descriptors = v == "1" || v == "true";
             }
             "-ccd" => {
                 full_ccd = match val()?.as_str() {
@@ -352,14 +360,14 @@ fn run_predict(args: &[String]) -> Result<(), String> {
     }
     log.info("FeatureSetup", "effectively enabled features: [chem, volsite, protrusion, bfactor, atom_table]");
     let tr = load_transformers(&install_dir);
-    let cfg = Config { install_dir: install_dir.clone(), threads, visualizations, full_ccd, rf_stages: rf_stages.clone(), fast, faster: faster.clone() };
+    let cfg = Config { install_dir: install_dir.clone(), threads, visualizations, full_ccd, rf_stages: rf_stages.clone(), fast, faster: faster.clone(), descriptors };
 
     log.info("Dataset", &format!("processing dataset [{}] using {} threads", ds_name, threads));
     let n = items.len();
     // like P2Rank, process dataset items in parallel; a single item uses all threads internally
     let item_threads = if n > 1 { 1 } else { threads };
     let workers = if n > 1 { threads.min(n) } else { 1 };
-    let cfg_item = Config { install_dir: cfg.install_dir.clone(), threads: item_threads, visualizations, full_ccd, rf_stages: rf_stages.clone(), fast, faster: faster.clone() };
+    let cfg_item = Config { install_dir: cfg.install_dir.clone(), threads: item_threads, visualizations, full_ccd, rf_stages: rf_stages.clone(), fast, faster: faster.clone(), descriptors };
     let next = std::sync::atomic::AtomicUsize::new(0);
     let results: std::sync::Mutex<Vec<(usize, String, pipeline::ItemError)>> = std::sync::Mutex::new(Vec::new());
     std::thread::scope(|sc| {

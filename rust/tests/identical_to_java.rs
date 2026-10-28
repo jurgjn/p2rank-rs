@@ -115,3 +115,32 @@ fn faster_mode_close_to_java() {
     let mean = diffs.iter().sum::<f64>() / diffs.len() as f64;
     assert!(mean < 0.1, "mean residue score difference {}", mean);
 }
+
+/// `-descriptors 1` adds `<label>_pockets_descriptors.csv` (one row per pocket) and leaves the
+/// other output files identical to the Java output.
+#[test]
+fn descriptors_add_a_file_only() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let case = root.join("tests").join("cases").join("1fbl.pdb");
+    let out = std::env::temp_dir().join(format!("prank-rs-test-descriptors-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&out);
+    let status = std::process::Command::new(env!("CARGO_BIN_EXE_prank-rs"))
+        .args(["predict", "-descriptors", "1", "-f"])
+        .arg(case.join("1fbl.pdb"))
+        .arg("-o")
+        .arg(&out)
+        .env("P2RANK_HOME", root.join("..").join("distro"))
+        .stdout(std::process::Stdio::null())
+        .status()
+        .expect("run prank-rs");
+    assert!(status.success());
+    for name in ["1fbl.pdb_predictions.csv", "1fbl.pdb_residues.csv"] {
+        let exp = std::fs::read(case.join(format!("expected_{}", name))).unwrap();
+        assert!(exp == std::fs::read(out.join(name)).unwrap(), "{} differs", name);
+    }
+    let pockets = std::fs::read_to_string(out.join("1fbl.pdb_predictions.csv")).unwrap().lines().count() - 1;
+    let desc = std::fs::read_to_string(out.join("1fbl.pdb_pockets_descriptors.csv")).unwrap();
+    assert_eq!(desc.lines().count() - 1, pockets);
+    assert!(desc.lines().nth(1).unwrap().starts_with("pocket1, 1, "));
+    let _ = std::fs::remove_dir_all(&out);
+}

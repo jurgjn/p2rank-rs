@@ -268,6 +268,12 @@ fn chem_for_atom(element: u8, name: &str, code: &str) -> [f64; 24] {
 
 // ---------------------------------------------------------------- volsite
 
+/// VolSite pharmacophore properties of a protein atom: [aromatic, cation, anion, hydrophobic,
+/// acceptor, donor] (0/1 flags)
+pub fn atom_pharmacophore(p: &Protein, a: usize) -> [f64; 6] {
+    volsite(&p.s.atoms[a].name, &correct_residue_code(p.s.atom_resname(a)))
+}
+
 /// VolSitePharmacophore.getAtomProperties -> [aromatic, cation, anion, hydrophobic, acceptor, donor]
 fn volsite(atom_code: &str, residue_code: &str) -> [f64; 6] {
     let name = atom_code.to_uppercase();
