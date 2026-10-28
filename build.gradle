@@ -79,7 +79,8 @@ tasks.register('copyBinaryToDist', Copy) {
 tasks.register('copyDocumentation', Copy) {
     from "$distroDir/../"
     into "$distroDir"
-    include "README.md", "LICENSE.txt"
+    include "README-P2Rank.md", "LICENSE.txt"
+    rename "README-P2Rank.md", "README.md"
 }
 
 assemble {

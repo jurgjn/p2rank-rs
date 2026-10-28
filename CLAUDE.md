@@ -59,9 +59,10 @@ in issues:
 
 ## Build artifacts (do not edit)
 
-- `distro/README.md` is **generated** from the top-level `README.md` by the
-  `copyDocumentation` task in `build.gradle` on every `./gradlew assemble`.
-  It is gitignored. Edit the top-level `README.md` only; never edit
+- `distro/README.md` is **generated** from the top-level `README-P2Rank.md` (the
+  original P2Rank README; the top-level `README.md` is the p2rank-rs front page)
+  by the `copyDocumentation` task in `build.gradle` on every `./gradlew assemble`.
+  It is gitignored. Edit the top-level `README-P2Rank.md` only; never edit
   `distro/README.md` directly — any changes are silently overwritten on the
   next build.
 
@@ -99,21 +100,21 @@ stand out.
 
 ## Don't flag these in doc reviews
 
-- **`README.md` rescoring list omits P2Rank itself.** The list enumerates
+- **`README-P2Rank.md` rescoring list omits P2Rank itself.** The list enumerates
   *other* tools whose pockets P2Rank rescores. Intentional.
-- **`README.md` release badge may lag `build.gradle`.** Updated at release,
+- **`README-P2Rank.md` release badge may lag `build.gradle`.** Updated at release,
   not on alpha bumps. Mismatch during alpha cycles is expected.
-- **`README.md` Publications list "nested" indentation** (PrankWeb 3 / PrankWeb 1
+- **`README-P2Rank.md` Publications list "nested" indentation** (PrankWeb 3 / PrankWeb 1
   rendered as sub-list under PrankWeb 4). Intentional grouping.
-- **`README.md` has a duplicate `rescore_2024` recommendation** (once inline in
+- **`README-P2Rank.md` has a duplicate `rescore_2024` recommendation** (once inline in
   a code-block comment, once in the paragraph below). Intentional emphasis.
-- **`README.md` Usage section uses `<pre><b>...</b></pre>` HTML** for the
+- **`README-P2Rank.md` Usage section uses `<pre><b>...</b></pre>` HTML** for the
   signature command. Intentional styling.
-- **`README.md` trailing whitespace and double blank lines** at various places.
+- **`README-P2Rank.md` trailing whitespace and double blank lines** at various places.
   Intentional spacing / Markdown hard-break formatting.
-- **`README.md` Java version phrasing "tested up to Java 26"** rather than
+- **`README-P2Rank.md` Java version phrasing "tested up to Java 26"** rather than
   enumerating the CI matrix. Intentional.
-- **`README.md` says SAS-point file's residue sequence is in "position 23-26"**.
+- **`README-P2Rank.md` says SAS-point file's residue sequence is in "position 23-26"**.
   That is the standard PDB resSeq field (columns 23-26). `PredictionVisualizer`
   uses `%2d` so the value sits in columns 25-26 of that field. The README
   description matches the PDB spec; do not change it to "columns 25-26".

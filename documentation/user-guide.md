@@ -69,7 +69,7 @@ into an automated pipeline.
 P2Rank generates a set of points on the protein's solvent-accessible surface, computes local
 chemical and geometric features for each point, and classifies them with a Random Forest model.
 Points with high ligandability scores are clustered into pockets and ranked.
-See the [README](../README.md) for publications and detailed algorithm descriptions.
+See the [README](../README-P2Rank.md) for publications and detailed algorithm descriptions.
 
 <p align="center">
     <img src="../misc/img/p2rank_sas_points.png" width="600" alt="Protein surface covered with SAS points, colored by predicted pocket membership. Green points cover the non-pocket surface; colored clusters (red, blue, pink, etc.) mark the top-ranked predicted binding pockets. Ligands are shown as stick models for reference.">
@@ -1171,7 +1171,7 @@ For training, cross-validation, and grid optimization commands (`traineval`, `pl
 ### 12.4 Citing P2Rank
 
 If you use P2Rank in your research, please cite the relevant publication(s). See the
-[README](../README.md#publications) for the full citation list and
+[README](../README-P2Rank.md#publications) for the full citation list and
 [BibTeX entries](../misc/citations.md).
 
 The primary citation for the P2Rank tool:

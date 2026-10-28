@@ -358,9 +358,9 @@ behaviour — kept in the file so they don't get re-raised.
 
 ## Doc / config drift
 
-- **README badge stuck at 2.5.1.** `README.md:11` vs `build.gradle:25`
+- **README badge stuck at 2.5.1.** `README-P2Rank.md:11` vs `build.gradle:25`
   (`2.6-alpha`). Kept until 2.6 leaves alpha. (The `./make-disro.sh` typo
-  on `README.md:226` was fixed 2026-05-22.)
+  on `README.md:226` (now `README-P2Rank.md`) was fixed 2026-05-22.)
 
 - **CI matrix is `17,21,25,26` only** (`.github/workflows/develop.yml:23`) and
   distribution switched temurin → oracle (commit `1997ab94`). **Not wanted**
