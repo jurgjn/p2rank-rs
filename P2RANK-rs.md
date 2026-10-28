@@ -17,8 +17,8 @@ Requirements: a Rust toolchain (`cargo`, tested with 1.99.1) and a C compiler (z
 statically). Java is **not** needed: the model files are part of the repository.
 
 ```bash
-git clone --branch rust-port --depth 1 https://github.com/jurgjn/p2rank.git
-cd p2rank/rust
+git clone --depth 1 https://github.com/jurgjn/p2rank-rs.git
+cd p2rank-rs/rust
 cargo build --release
 target/release/prank-rs predict -f ../distro/test_data/1fbl.pdb -o out/
 ```
