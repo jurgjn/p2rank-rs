@@ -1,0 +1,22 @@
+[package]
+name = "p2rank-rs"
+version = "0.1.0"
+edition = "2021"
+description = "Rust port of the P2Rank `predict` pipeline, producing output identical to the Java implementation"
+
+[[bin]]
+name = "prank-rs"
+path = "src/main.rs"
+
+[dependencies]
+flate2 = { version = "1", default-features = false, features = ["zlib"] }
+libz-sys = { version = "1", default-features = false, features = ["static", "libc"] }
+memmap2 = "0.9.12"
+ruzstd = "0.9.1"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+debug = false

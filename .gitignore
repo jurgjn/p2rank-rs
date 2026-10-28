@@ -47,3 +47,6 @@ CLAUDE.local.md
 # bench artifacts (pocket_grid_features_bench.sh)
 jfr-*.jfr
 misc/test-scripts/bench-results.csv
+
+# prank-rs model cache (generated from model.zst)
+*.flb

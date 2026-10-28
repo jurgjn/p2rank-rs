@@ -198,6 +198,26 @@ behaviour — kept in the file so they don't get re-raised.
 
 ## Inconsistencies / parity gaps
 
+- **Predictions depend on network access (BioJava chem comp download).**
+  `PdbUtils.disableBiojavaFetching()` is a no-op, so BioJava's default
+  `DownloadChemCompProvider` fetches CCD entries from RCSB on first use (cached
+  in `/tmp/chemcomp`) and falls back to the bundled `ReducedChemCompProvider`
+  when offline. Group types of nonstandard residues differ between the two, so
+  output changes: 20 of 4009 holo4k structures (e.g. 1a2c, 1apv, 1vbt, 3sga)
+  get different pockets/residue scores with vs. without network (found while
+  validating the Rust port, `rust/`, which reproduces both via `-ccd`). Fix:
+  pin one provider (e.g. a bundled full CCD table) so results are reproducible.
+
+- **`params.txt` "git head" comes from the current working directory.**
+  `Routine.getGitHeadId()` runs `git rev-parse --short HEAD` in the CWD, so it
+  reports whatever repo the user happens to be in (or an empty value), not the
+  P2Rank build. Use the build properties instead.
+
+- **Dataset items with the same file name overwrite each other's outputs.**
+  Output files are named by `item.label` (file name), so e.g.
+  `test_data/specified-chains.ds` (10 items, all `2W83.pdb`) writes one set of
+  files and, with parallel processing, which item wins is nondeterministic.
+
 - **Alternate-conformation chain reducer: full-benchmark validation pending.**
   `AlternateChainReducer` (default on via `reduce_alternate_conformation_chains`)
   collapses microheterogeneity-as-chains (6een); verified by unit tests + the 3
