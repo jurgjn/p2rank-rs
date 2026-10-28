@@ -212,27 +212,53 @@ impl Forest {
     /// Instances that pass all stages get exactly the full-forest score.
     /// Returns, for each instance, the number of trees used (num_trees if not stopped early).
     pub fn predict_block_cascade(&self, xs: &[&[f64]], stages: &[(usize, f64)], out: &mut [f64]) -> Vec<u16> {
+        self.predict_block_cascade_k(xs, stages, self.num_trees, out)
+    }
+
+    /// Like [`Self::predict_block_cascade`], with only the first `trees` trees making up the forest
+    /// (random forest trees are i.i.d., so this is an unbiased smaller forest).
+    pub fn predict_block_cascade_k(&self, xs: &[&[f64]], stages: &[(usize, f64)], trees: usize, out: &mut [f64]) -> Vec<u16> {
+        let n = xs.len();
+        let mut s0 = vec![0.0f64; n];
+        let mut s1 = vec![0.0f64; n];
+        let used = self.advance(xs, &mut s0, &mut s1, 0, stages, trees);
+        for i in 0..n {
+            out[i] = Self::normalized(s0[i], s1[i]);
+        }
+        used
+    }
+
+    /// NormalizationUtils.normalizedProb of the class sums
+    pub fn normalized(s0: f64, s1: f64) -> f64 {
+        if s0 + s1 == 0.0 {
+            0.0
+        } else {
+            s1 / (s0 + s1)
+        }
+    }
+
+    /// Resumable cascade: the instances have class sums `s0`/`s1` over the first `from` trees;
+    /// adds trees up to `trees`, stopping instances early at the `stages` (k, cutoff) with k > from.
+    /// Trees are added one by one in order, so resuming gives the same sums as one pass.
+    /// Returns, for each instance, the number of trees in its sums.
+    pub fn advance(&self, xs: &[&[f64]], s0: &mut [f64], s1: &mut [f64], from: usize, stages: &[(usize, f64)], trees: usize) -> Vec<u16> {
+        let trees = trees.clamp(1, self.num_trees);
         let n = xs.len();
         for x in xs {
             assert!(x.len() + 1 >= self.num_attributes, "feature vector too short for model");
         }
-        let mut s0 = vec![0.0f64; n];
-        let mut s1 = vec![0.0f64; n];
-        let norm = |a: f64, b: f64| if a + b == 0.0 { 0.0 } else { b / (a + b) };
         let mut alive: Vec<usize> = (0..n).collect();
-        let mut used = vec![self.num_trees as u16; n];
-        let mut done_trees = 0;
+        let mut used = vec![trees as u16; n];
+        let mut done_trees = from.min(trees);
         for &(k, cutoff) in stages {
-            let k = k.min(self.num_trees);
+            let k = k.min(trees);
             if k <= done_trees {
                 continue;
             }
-            self.accumulate(xs, &alive, done_trees..k, &mut s0, &mut s1);
+            self.accumulate(xs, &alive, done_trees..k, s0, s1);
             done_trees = k;
             alive.retain(|&i| {
-                let p = norm(s0[i], s1[i]);
-                if p < cutoff {
-                    out[i] = p;
+                if Self::normalized(s0[i], s1[i]) < cutoff {
                     used[i] = k as u16;
                     false
                 } else {
@@ -240,11 +266,7 @@ impl Forest {
                 }
             });
         }
-        self.accumulate(xs, &alive, done_trees..self.num_trees, &mut s0, &mut s1);
-        for &i in &alive {
-            // NormalizationUtils.normalizedProb
-            out[i] = norm(s0[i], s1[i]);
-        }
+        self.accumulate(xs, &alive, done_trees..trees, s0, s1);
         used
     }
 }

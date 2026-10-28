@@ -4,7 +4,8 @@
 In the default `exact` mode it produces **byte-identical output files** to the Java P2Rank, and is
 25-40x faster for a single structure and 3-10x faster on whole datasets. The optional `fast` mode
 is another 1.5-1.7x faster on datasets, with documented differences far below P2Rank's own
-seed-to-seed variation (see [Modes](#modes-exact-and-fast)).
+seed-to-seed variation, and `faster` saves another 15-20% of CPU time by scoring only part of the
+protein surface (see [Modes](#modes-exact-fast-and-faster)).
 
 ```bash
 cd rust
@@ -19,8 +20,8 @@ P2RANK_HOME=../distro target/release/prank-rs predict -f ../distro/test_data/1fb
 ## Usage
 
 ```
-prank-rs predict -f <structure> [-o <outdir>] [-mode exact|fast] [-threads <n>] [-visualizations 0|1] [-ccd reduced|full]
-prank-rs predict <dataset.ds>  [-o <outdir>] [-mode exact|fast] [-threads <n>] [-visualizations 0|1] [-ccd reduced|full]
+prank-rs predict -f <structure> [-o <outdir>] [-mode exact|fast|faster] [-threads <n>] [-visualizations 0|1] [-ccd reduced|full]
+prank-rs predict <dataset.ds>  [-o <outdir>] [-mode exact|fast|faster] [-threads <n>] [-visualizations 0|1] [-ccd reduced|full]
 prank-rs convert-model [<model_dir>]
 ```
 
@@ -38,7 +39,7 @@ prank-rs convert-model [<model_dir>]
 > Run `prank-rs convert-model` to create it explicitly (e.g. for a read-only installation, as
 > the user owning it). The cache is ignored if it is older than `model.zst`.
 
-## Modes: `exact` and `fast`
+## Modes: `exact`, `fast` and `faster`
 
 Following the mode vocabulary of
 [uplifting-biomolecular-modeling](https://github.com/anthropics/uplifting-biomolecular-modeling):
@@ -46,6 +47,8 @@ Following the mode vocabulary of
 * `exact` (default): output byte-identical to Java P2Rank.
 * `fast`: faster, with small documented numeric differences that stay within the tool's own
   seed-to-seed variation.
+* `faster`: `fast` plus scoring only part of the surface. It occasionally drops a low-ranked
+  pocket (see [`faster`](#faster-score-only-part-of-the-surface)).
 
 `fast` changes three things:
 
@@ -98,6 +101,56 @@ between two retrained models (seeds 42 and 43), both run in `exact` mode:
 > differences. The same `fast` settings applied to a retrained model (seed 42) also gave
 > byte-identical `predictions.csv` for all of holo4k.
 
+### `faster`: score only part of the surface
+
+`faster` builds on `fast` (same early exit, summation order and gzip level). Instead of computing
+features and forest scores for every SAS point, it computes them on demand:
+
+1. **Seeds.** Only points on 12 of the 42 tessellation directions are scored at first (the
+   level-1 icosahedron directions are an exact subset of the level-2 ones used by P2Rank), about
+   30% of all points, using the `fast` early exit.
+2. **Expansion.** Every point within 4 A of a seed scoring at least 0.1, or of any point scoring
+   at least 0.2, is scored with the same early exit, repeated until no new points are added.
+3. **Completion.** Every point within 3.5 A (the extended pocket distance) of a point scoring at
+   least 0.35 gets the full 100-tree score. The forest keeps per-point class sums, so completing a
+   point adds the remaining trees instead of starting over, with bit-identical results.
+4. **Background.** Early-stopped points with a partial score below 0.03 get 0.03, the RMS full
+   score of such points on ah4h (a dataset used neither for training nor for this evaluation;
+   their partial score is usually exactly 0). Points never scored get the distance-weighted mean
+   of scored points within 3 A, or 0.03.
+
+Clustering and pocket scores therefore only see full 100-tree scores, so every pocket `faster`
+finds has the same score, rank order, center and residues as in `exact`. A pocket is lost only
+if none of its points is near a seed scoring at least 0.1.
+
+> [!WARNING]
+> `faster` lost 11 of the pockets of 300 coach420 structures and 290 of 3448 holo4k structures.
+> None was ranked first. The lost pockets have a median P2Rank probability of 0.004 (maximum
+> 0.17). It never added or moved a pocket.
+
+Same evaluation as above (coach420(mlig) and holo4k(mlig) proteins, compared with `exact`):
+
+| | coach420 | holo4k |
+|---|---:|---:|
+| DCA_4_0 / DCA_4_2, `exact` | 0.6969 / 0.7332 | 0.7671 / 0.8346 |
+| DCA_4_0 / DCA_4_2, `faster` | 0.6969 / 0.7332 | 0.7671 / 0.8346 |
+| identical `predictions.csv` | 96.3% | 92.6% |
+| top-1 pocket identical | 100% | 100% |
+| residue score, mean abs. difference (bias) | 0.044 (-0.007) | 0.044 (-0.012) |
+| residue pocket assignment agreement | 99.9% | 99.8% |
+
+`faster` saves 17% of the CPU time of `fast` on holo4k and 13% on coach420 (see
+[Performance](#performance)). Most of the remaining forest work is the full scoring of the
+pocket regions.
+
+> [!NOTE]
+> Using only the first 70 of the 100 trees (dev override `P2RS_DEV_TREES=70`, i.e. an unbiased
+> smaller random forest) saves another 10% of CPU time. On holo4k it keeps every agreement
+> metric within seed-to-seed variation (pocket score mean relative difference 4.3%, top-1 center
+> within 1 A 93.8%, residue score mean abs. difference 0.072), but it changes DCA_4_0 / DCA_4_2 to
+> 0.7678 / 0.8381, more than the seed-to-seed SD (upwards, from more, smaller pockets). It is
+> therefore not the default.
+
 ### `-ccd`: chemical component dictionary
 
 How BioJava classifies residues depends on its chemical component dictionary, and P2Rank's
@@ -146,7 +199,7 @@ All output files compared against Java P2Rank 2.6-alpha.8 (JDK 25):
 | `test_data` CIF / BinaryCIF / zstd variants | 9 | 56 | 0 |
 
 `cargo test` runs a regression subset (PDB, multi-chain, unusual elements, mmCIF, BinaryCIF)
-against stored Java outputs in `tests/cases/`, checks `fast` mode against them within tolerance,
+against stored Java outputs in `tests/cases/`, checks `fast` and `faster` modes against them within tolerance,
 and checks number formatting against Java on 10k reference values. `tools/compare.sh` runs both implementations on a dataset and compares
 all files.
 
@@ -154,14 +207,15 @@ all files.
 
 Wall time (median of several runs, local disk, shared 64-core node):
 
-| | Java P2Rank | prank-rs `exact` | prank-rs `fast` |
-|---|---:|---:|---:|
-| `1fbl.pdb` (2.9k atoms) | 3.18 s | 0.083 s | 0.076 s |
-| `1AHP.pdb` (12.5k atoms, 17k SAS points) | 3.71 s | 0.150 s | 0.124 s |
-| coach420 (420 structures) | 9.2-11.8 s | 1.2 s | 0.82 s |
-| holo4k (4009 structures) | 29-33 s | 9.5 s | 5.5 s |
+| | Java P2Rank | prank-rs `exact` | prank-rs `fast` | prank-rs `faster` |
+|---|---:|---:|---:|---:|
+| `1fbl.pdb` (2.9k atoms) | 3.18 s | 0.083 s | 0.076 s | 0.073 s |
+| `1AHP.pdb` (12.5k atoms, 17k SAS points) | 3.71 s | 0.150 s | 0.124 s | 0.121 s |
+| coach420 (420 structures) | 9.2-11.8 s | 1.2 s | 0.82 s | 0.80 s |
+| holo4k (4009 structures) | 29-33 s | 9.5 s | 5.5 s | 5.0 s |
 
-CPU time on holo4k: Java 1324-1520 s, `exact` 503 s, `fast` 269 s. Peak memory is 2-5x lower
+CPU time on holo4k: Java 1324-1520 s, `exact` 503 s, `fast` 269 s, `faster` 224-238 s. On
+coach420: `exact` 36-38 s, `fast` 21.5 s, `faster` 18.5-18.8 s. Peak memory is 2-5x lower
 than Java. Set `P2RS_TIMING=1` to print a per-phase breakdown (`tools/phase_bench.py` reports the
 minimum over several runs).
 

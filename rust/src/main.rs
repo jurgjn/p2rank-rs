@@ -33,16 +33,45 @@ const VERSION: &str = "2.6-alpha.8";
 /// partial score; all other points get the full 100-tree score.
 const FAST_RF_STAGES: &[(usize, f64)] = &[(10, 0.05), (20, 0.1)];
 
+/// `-mode faster` (see `pipeline::faster_scores`), development overrides in parentheses:
+/// seed scoring only on the 12 coarse (level-1) of the 42 tessellation directions (P2RS_DEV_SEED=all|coarse)
+const FASTER_SEED_COARSE: bool = true;
+/// seed only points with protrusion >= this, 0 = off (P2RS_DEV_PROT_GATE)
+const FASTER_PROT_GATE: f64 = 0.0;
+/// points scoring >= this trigger scoring of their neighborhood (P2RS_DEV_REFINE_SCORE)
+const FASTER_REFINE_SCORE: f64 = 0.2;
+/// ... and so do seed points scoring >= this (P2RS_DEV_SEED_TRIGGER)
+const FASTER_SEED_TRIGGER: f64 = 0.1;
+/// neighborhood radius (P2RS_DEV_REFINE_RADIUS)
+const FASTER_REFINE_RADIUS: f64 = 4.0;
+/// early-exit stages for neighborhood points (P2RS_DEV_REFINE_STAGES="k:cutoff,...")
+const FASTER_REFINE_STAGES: &[(usize, f64)] = &[(10, 0.05), (20, 0.1)];
+/// number of trees, i.e. the first n of 100 (P2RS_DEV_TREES)
+const FASTER_TREES: usize = 100;
+
+/// "k:cutoff,k:cutoff" early-exit stages
+fn parse_stages(s: &str) -> Vec<(usize, f64)> {
+    s.split(',')
+        .filter(|x| !x.is_empty())
+        .map(|kv| {
+            let (k, c) = kv.split_once(':').expect("stage k:cutoff");
+            (k.parse().expect("stage k"), c.parse().expect("stage cutoff"))
+        })
+        .collect()
+}
+
 fn usage() -> ! {
     eprintln!(
         "prank-rs {VERSION} - Rust port of P2Rank `predict` (default model)
 
 usage:
-  prank-rs predict -f <structure> [-o <outdir>] [-mode exact|fast] [-threads <n>] [-visualizations 0|1] [-ccd reduced|full]
-  prank-rs predict <dataset.ds>  [-o <outdir>] [-mode exact|fast] [-threads <n>] [-visualizations 0|1] [-ccd reduced|full]
+  prank-rs predict -f <structure> [-o <outdir>] [-mode exact|fast|faster] [-threads <n>] [-visualizations 0|1] [-ccd reduced|full]
+  prank-rs predict <dataset.ds>  [-o <outdir>] [-mode exact|fast|faster] [-threads <n>] [-visualizations 0|1] [-ccd reduced|full]
 
-  -mode exact|fast    exact (default): output byte-identical to Java P2Rank;
-                      fast: faster, small documented differences (see README)
+  -mode exact|fast|faster
+                      exact (default): output byte-identical to Java P2Rank;
+                      fast: faster, small documented differences (see README);
+                      faster: faster still, scores only part of the surface (see README)
   -ccd reduced|full   chemical component dictionary used for residue classification:
                       reduced (default) = BioJava's bundled fallback set (P2Rank without network),
                       full = complete wwPDB CCD (P2Rank with access to RCSB)
@@ -232,8 +261,8 @@ fn run_predict(args: &[String]) -> Result<(), String> {
             }
             "-mode" => {
                 mode = val()?;
-                if mode != "exact" && mode != "fast" {
-                    return Err(format!("invalid -mode '{}' (exact|fast)", mode));
+                if mode != "exact" && mode != "fast" && mode != "faster" {
+                    return Err(format!("invalid -mode '{}' (exact|fast|faster)", mode));
                 }
             }
             "-ccd" => {
@@ -264,18 +293,26 @@ fn run_predict(args: &[String]) -> Result<(), String> {
         }
         i += 2;
     }
-    let fast = mode == "fast";
+    let fast = mode == "fast" || mode == "faster";
+    let faster = if mode == "faster" {
+        // development overrides, see the FASTER_* constants
+        let env = |k: &str| std::env::var(k).ok();
+        Some(pipeline::FasterParams {
+            seed_coarse: env("P2RS_DEV_SEED").map(|v| v != "all").unwrap_or(FASTER_SEED_COARSE),
+            prot_gate: env("P2RS_DEV_PROT_GATE").map(|v| v.parse().expect("P2RS_DEV_PROT_GATE")).unwrap_or(FASTER_PROT_GATE),
+            refine_score: env("P2RS_DEV_REFINE_SCORE").map(|v| v.parse().expect("P2RS_DEV_REFINE_SCORE")).unwrap_or(FASTER_REFINE_SCORE),
+            seed_trigger: env("P2RS_DEV_SEED_TRIGGER").map(|v| v.parse().expect("P2RS_DEV_SEED_TRIGGER")).unwrap_or(FASTER_SEED_TRIGGER),
+            refine_radius: env("P2RS_DEV_REFINE_RADIUS").map(|v| v.parse().expect("P2RS_DEV_REFINE_RADIUS")).unwrap_or(FASTER_REFINE_RADIUS),
+            trees: env("P2RS_DEV_TREES").map(|v| v.parse().expect("P2RS_DEV_TREES")).unwrap_or(FASTER_TREES),
+            refine_stages: env("P2RS_DEV_REFINE_STAGES").map(|v| parse_stages(&v)).unwrap_or_else(|| FASTER_REFINE_STAGES.to_vec()),
+        })
+    } else {
+        None
+    };
     let mut rf_stages: Vec<(usize, f64)> = if fast { FAST_RF_STAGES.to_vec() } else { Vec::new() };
     // development override, e.g. P2RS_DEV_STAGES="10:0.05,20:0.1"
     if let Ok(s) = std::env::var("P2RS_DEV_STAGES") {
-        rf_stages = s
-            .split(',')
-            .filter(|x| !x.is_empty())
-            .map(|kv| {
-                let (k, c) = kv.split_once(':').expect("stage k:cutoff");
-                (k.parse().expect("stage k"), c.parse().expect("stage cutoff"))
-            })
-            .collect();
+        rf_stages = parse_stages(&s);
     }
     let install_dir = find_install_dir()?;
     let threads = threads.unwrap_or_else(|| std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1) + 1);
@@ -315,14 +352,14 @@ fn run_predict(args: &[String]) -> Result<(), String> {
     }
     log.info("FeatureSetup", "effectively enabled features: [chem, volsite, protrusion, bfactor, atom_table]");
     let tr = load_transformers(&install_dir);
-    let cfg = Config { install_dir: install_dir.clone(), threads, visualizations, full_ccd, rf_stages: rf_stages.clone(), fast };
+    let cfg = Config { install_dir: install_dir.clone(), threads, visualizations, full_ccd, rf_stages: rf_stages.clone(), fast, faster: faster.clone() };
 
     log.info("Dataset", &format!("processing dataset [{}] using {} threads", ds_name, threads));
     let n = items.len();
     // like P2Rank, process dataset items in parallel; a single item uses all threads internally
     let item_threads = if n > 1 { 1 } else { threads };
     let workers = if n > 1 { threads.min(n) } else { 1 };
-    let cfg_item = Config { install_dir: cfg.install_dir.clone(), threads: item_threads, visualizations, full_ccd, rf_stages: rf_stages.clone(), fast };
+    let cfg_item = Config { install_dir: cfg.install_dir.clone(), threads: item_threads, visualizations, full_ccd, rf_stages: rf_stages.clone(), fast, faster: faster.clone() };
     let next = std::sync::atomic::AtomicUsize::new(0);
     let results: std::sync::Mutex<Vec<(usize, String, pipeline::ItemError)>> = std::sync::Mutex::new(Vec::new());
     std::thread::scope(|sc| {

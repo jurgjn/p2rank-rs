@@ -553,6 +553,14 @@ impl FeatureContext {
     }
 
     /// PrankFeatureExtractor.calcFeatureVector for a SAS point
+    /// `protrusion.protrusion` alone (deep-layer atoms within 10 A), much cheaper than the full vector
+    pub fn protrusion(&self, point: &P3) -> f64 {
+        (match &self.deep_grid {
+            Some(g) => g.count_within(point, 10.0),
+            None => self.deep_layer.count_within_sphere(point, 10.0),
+        }) as f64
+    }
+
     pub fn sas_vector(&self, point: &P3, scratch: &mut Vec<u32>) -> FVec {
         match &self.exposed_grid {
             Some(g) => {

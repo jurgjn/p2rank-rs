@@ -19,6 +19,27 @@ pub struct Config {
     pub rf_stages: Vec<(usize, f64)>,
     /// fast mode (approximations allowed)
     pub fast: bool,
+    /// faster mode (implies fast): score a sparse subset of SAS points, fill in near pockets
+    pub faster: Option<FasterParams>,
+}
+
+/// `-mode faster` parameters (see `faster_scores`)
+#[derive(Clone, Debug)]
+pub struct FasterParams {
+    /// seed only points on the 12 level-1 directions (of the 42 level-2 ones)
+    pub seed_coarse: bool,
+    /// seed only points with at least this protrusion (deep-layer atoms within 10 A); 0 = off
+    pub prot_gate: f64,
+    /// points scoring at least this trigger refinement of their neighborhood
+    pub refine_score: f64,
+    /// seed points scoring at least this also trigger refinement (<= refine_score)
+    pub seed_trigger: f64,
+    /// refinement neighborhood radius
+    pub refine_radius: f64,
+    /// early-exit stages used when refining (empty = full forest)
+    pub refine_stages: Vec<(usize, f64)>,
+    /// use only the first `trees` trees of the forest
+    pub trees: usize,
 }
 
 pub struct Log {
@@ -166,6 +187,188 @@ fn refine_fast_scores(sas: &[[f64; 3]], vectors: &[V], sc: &mut [f64], used: &mu
     }
 }
 
+/// Faster mode. Feature vectors and random forest scores are computed lazily, for three sets of
+/// points, keeping per-point class sums so that more trees can be added later:
+/// 1. seeds: points on the coarse (level-1) tessellation directions (optionally only those with
+///    enough protrusion), scored with the early-exit cascade;
+/// 2. expansion: every point within `refine_radius` of a trigger point (score >= `refine_score`,
+///    or a seed with score >= `seed_trigger`) is scored with the `refine_stages` cascade;
+/// 3. completion: every point within the extended pocket cutoff (3.5 A) of a point scoring
+///    >= 0.35 gets all `trees` trees, so pockets (clustering and pocket scores) only see full scores.
+/// Steps 2 and 3 repeat until stable. Early-exited points with a (near) zero partial score get
+/// the typical full score of such points, and points never scored get a distance-weighted mean of
+/// nearby scored points (capped below the refine trigger), or that same typical score.
+fn faster_scores(sas: &[[f64; 3]], tags: &[u32], ctx: &FeatureContext, forest: &Forest, cfg: &Config, fp: &FasterParams) -> Vec<f64> {
+    let n = sas.len();
+    let full = fp.trees.clamp(1, forest.num_trees) as u16;
+    let coarse = crate::surface::nested_direction_mask(1, 2).expect("tessellation tables");
+    let mut is_seed: Vec<bool> = (0..n).map(|i| !fp.seed_coarse || coarse[crate::surface::tag_dir(tags[i])]).collect();
+    if fp.prot_gate > 0.0 {
+        let idx: Vec<u32> = (0..n as u32).filter(|&i| is_seed[i as usize]).collect();
+        let keep: Vec<bool> = parallel_map(&idx, cfg.threads, |&i, _| ctx.protrusion(&sas[i as usize]) >= fp.prot_gate);
+        for (&i, k) in idx.iter().zip(keep) {
+            is_seed[i as usize] = k;
+        }
+    }
+
+    let mut vectors: Vec<V> = vec![V::default(); n];
+    let mut has_vec = vec![false; n];
+    let mut s0 = vec![0.0f64; n];
+    let mut s1 = vec![0.0f64; n];
+    // trees in the class sums (0 = not scored)
+    let mut used = vec![0u16; n];
+    let mut sc = vec![0.0f64; n];
+
+    // scores each job's points up to `full` trees (resuming from the current sums) with the job's
+    // early-exit stages, computing missing feature vectors on the way (one parallel pass)
+    let run = |jobs: &mut [(&mut Vec<u32>, &[(usize, f64)])], vectors: &mut Vec<V>, has_vec: &mut Vec<bool>, s0: &mut Vec<f64>, s1: &mut Vec<f64>, used: &mut Vec<u16>, sc: &mut Vec<f64>| {
+        let total: usize = jobs.iter().map(|j| j.0.len()).sum();
+        // blocks of points with the same number of trees done; small blocks if there are few
+        // points, so that all threads get work (scores do not depend on the blocking)
+        let block = (total / (2 * cfg.threads)).clamp(32, 256);
+        let mut blocks: Vec<(&[u32], &[(usize, f64)])> = Vec::new();
+        for (todo, stages) in jobs.iter_mut() {
+            todo.sort_by_key(|&i| (used[i as usize], i));
+            let todo: &[u32] = todo;
+            let mut k = 0;
+            while k < todo.len() {
+                let u = used[todo[k] as usize];
+                let mut e = k;
+                while e < todo.len() && e - k < block && used[todo[e] as usize] == u {
+                    e += 1;
+                }
+                blocks.push((&todo[k..e], *stages));
+                k = e;
+            }
+        }
+        let (vectors_r, has_vec_r, s0r, s1r, usedr) = (&*vectors, &*has_vec, &*s0, &*s1, &*used);
+        let res: Vec<(Vec<(u32, V)>, Vec<f64>, Vec<f64>, Vec<u16>)> = parallel_map_blocks(&blocks, cfg.threads, |(b, stages)| {
+            let mut scratch = Vec::new();
+            let new: Vec<(u32, V)> = b.iter().filter(|&&i| !has_vec_r[i as usize]).map(|&i| (i, V(ctx.sas_vector(&sas[i as usize], &mut scratch)))).collect();
+            let mut k = 0;
+            let xs: Vec<&[f64]> = b
+                .iter()
+                .map(|&i| {
+                    if has_vec_r[i as usize] {
+                        &vectors_r[i as usize].0[..]
+                    } else {
+                        k += 1;
+                        &new[k - 1].1 .0[..]
+                    }
+                })
+                .collect();
+            let mut a: Vec<f64> = b.iter().map(|&i| s0r[i as usize]).collect();
+            let mut c: Vec<f64> = b.iter().map(|&i| s1r[i as usize]).collect();
+            let u = forest.advance(&xs, &mut a, &mut c, usedr[b[0] as usize] as usize, stages, full as usize);
+            (new, a, c, u)
+        });
+        for ((b, _), (new, a, c, u)) in blocks.iter().zip(res) {
+            for (i, v) in new {
+                vectors[i as usize] = v;
+                has_vec[i as usize] = true;
+            }
+            for (j, &i) in b.iter().enumerate() {
+                let i = i as usize;
+                s0[i] = a[j];
+                s1[i] = c[j];
+                used[i] = u[j];
+                sc[i] = Forest::normalized(a[j], c[j]);
+            }
+        }
+    };
+
+    let mut seeds: Vec<u32> = (0..n as u32).filter(|&i| is_seed[i as usize]).collect();
+    let n_seeds = seeds.len();
+    run(&mut [(&mut seeds, &cfg.rf_stages)], &mut vectors, &mut has_vec, &mut s0, &mut s1, &mut used, &mut sc);
+
+    // all points, for neighborhood queries around trigger points
+    let all = crate::atoms::CountGrid::new_indexed(sas, fp.refine_radius.max(predict::EXTENDED_POCKET_CUTOFF));
+    let mut expanded = vec![false; n]; // neighborhood expanded (as a trigger)
+    let mut completed = vec![false; n]; // neighborhood completed (as a pocket point)
+    let mut in_expansion = vec![false; n];
+    loop {
+        let mut grow: Vec<u32> = Vec::new();
+        let mut complete: Vec<u32> = Vec::new();
+        let mut mark = vec![false; n];
+        if let Some(all) = &all {
+            for i in 0..n {
+                if used[i] == 0 {
+                    continue;
+                }
+                if !completed[i] && sc[i] >= predict::PRED_POINT_THRESHOLD {
+                    completed[i] = true;
+                    all.for_each_within(&sas[i], predict::EXTENDED_POCKET_CUTOFF, |j| {
+                        let j = j as usize;
+                        if used[j] < full && !mark[j] {
+                            mark[j] = true;
+                            complete.push(j as u32);
+                        }
+                    });
+                }
+                if !expanded[i] && (sc[i] >= fp.refine_score || (is_seed[i] && sc[i] >= fp.seed_trigger)) {
+                    expanded[i] = true;
+                    all.for_each_within(&sas[i], fp.refine_radius, |j| {
+                        let j = j as usize;
+                        if !in_expansion[j] && used[j] < full {
+                            in_expansion[j] = true;
+                            grow.push(j as u32);
+                        }
+                    });
+                }
+            }
+        }
+        grow.retain(|&j| !mark[j as usize]);
+        if grow.is_empty() && complete.is_empty() {
+            break;
+        }
+        run(&mut [(&mut complete, &[]), (&mut grow, &fp.refine_stages)], &mut vectors, &mut has_vec, &mut s0, &mut s1, &mut used, &mut sc);
+    }
+
+    // early-exited points mostly have a partial score of 0 after 10 trees: use their typical
+    // full-forest score instead, which keeps residue scores (sums of squared scores) unbiased
+    for i in 0..n {
+        if used[i] > 0 && used[i] < full && sc[i] < FASTER_EARLY_EXIT_SCORE {
+            sc[i] = FASTER_EARLY_EXIT_SCORE;
+        }
+    }
+    // impute never-scored points: inverse-distance weighted mean of scored points within
+    // FASTER_IMPUTE_RADIUS (capped below the refine trigger), or the early-exit score
+    let scored: Vec<u32> = (0..n as u32).filter(|&i| used[i as usize] > 0).collect();
+    let scored_pos: Vec<[f64; 3]> = scored.iter().map(|&i| sas[i as usize]).collect();
+    let grid = crate::atoms::CountGrid::new_indexed(&scored_pos, FASTER_IMPUTE_RADIUS);
+    let unscored: Vec<u32> = (0..n as u32).filter(|&i| used[i as usize] == 0).collect();
+    let cap = fp.refine_score - 0.01;
+    let fill: Vec<f64> = parallel_map(&unscored, cfg.threads, |&i, _| {
+        let q = &sas[i as usize];
+        let (mut ws, mut wv) = (0.0, 0.0);
+        if let Some(grid) = &grid {
+            grid.for_each_within(q, FASTER_IMPUTE_RADIUS, |k| {
+                let j = scored[k as usize] as usize;
+                let w = 1.0 / (crate::atoms::dist(q, &sas[j]) + 0.5);
+                ws += w;
+                wv += w * sc[j];
+            });
+        }
+        if ws > 0.0 { (wv / ws).min(cap) } else { FASTER_EARLY_EXIT_SCORE }
+    });
+    for (&i, v) in unscored.iter().zip(fill) {
+        sc[i as usize] = v;
+    }
+    if std::env::var("P2RS_DEV_STATS").is_ok() {
+        let nf = has_vec.iter().filter(|&&b| b).count();
+        let nfull = used.iter().filter(|&&u| u == full).count();
+        eprintln!("faster: points {} seeds {} vectors {} full-forest {}", n, n_seeds, nf, nfull);
+    }
+    sc
+}
+
+/// RMS full-forest score of points stopped after 10 trees (0.0297 on ah4h, which is neither
+/// training nor evaluation data; on the training set chen11 it is lower, 0.0179)
+const FASTER_EARLY_EXIT_SCORE: f64 = 0.03;
+
+/// neighborhood radius for imputing scores of never-scored points (coarse points are ~3.5 A apart)
+const FASTER_IMPUTE_RADIUS: f64 = 3.0;
+
 /// points with at least this (partial or full) score trigger exact rescoring of their neighbors
 const FAST_REFINE_SCORE: f64 = 0.2;
 /// neighborhood radius for exact rescoring (covers pocket extension and clustering distances)
@@ -304,7 +507,7 @@ pub fn predict_file(item: &Item, outdir: &Path, cfg: &Config, forest: &Forest, t
     for &a in &p.protein_atoms {
         vdw.push(surface_vdw_radius(p.s.atoms[a].element, &p.s.atoms[a].name).map_err(|e| ItemError::new("IllegalArgumentException", e))?);
     }
-    let sas = crate::surface::compute_surface_points(&centers, &vdw, 1.6, 2, cfg.threads).map_err(|e| ItemError::new("IllegalArgumentException", e))?;
+    let (sas, sas_tags) = crate::surface::compute_surface_points_tagged(&centers, &vdw, 1.6, 2, cfg.threads).map_err(|e| ItemError::new("IllegalArgumentException", e))?;
     tick("surface");
     log.info("Protein", &format!("SAS points (solventRadius=1.6, tessellation=2): {}", sas.len()));
 
@@ -324,7 +527,9 @@ pub fn predict_file(item: &Item, outdir: &Path, cfg: &Config, forest: &Forest, t
     }
 
     // features + classification
-    let scores: Vec<f64> = {
+    let scores: Vec<f64> = if let Some(fp) = &cfg.faster {
+        faster_scores(&sas, &sas_tags, &ctx, forest, cfg, fp)
+    } else {
         let vectors: Vec<V> = parallel_map(&sas, cfg.threads, |pt, scratch| V(ctx.sas_vector(pt, scratch)));
         tick("features");
         // classify in blocks (tree-major traversal keeps each tree cache resident)

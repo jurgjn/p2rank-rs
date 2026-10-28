@@ -538,6 +538,18 @@ documentation only.
   (`KdTreeAssigner.java:41`): every atom returned by the KD tree is in
   `latticeIndex` by construction.
 
+- **`prank-rs` `fast` refinement rescans every SAS point per round**
+  (`rust/src/pipeline.rs` `refine_fast_scores`): each round rebuilds a grid of
+  all high-scoring points and tests all points against it. `faster_scores`
+  expands only from new trigger points; the same frontier approach would keep
+  `fast` byte-identical and save its share of `CountGrid::any_within` time
+  (about 6% of CPU on holo4k in an early `faster` prototype). (likely)
+
+- **`prank-rs` spawns scoped threads for every parallel step** (no thread
+  pool): `faster_scores` runs several dependent rounds per structure, so for a
+  single structure on many cores spawn latency eats most of its gain over
+  `fast`. A persistent pool would help single-structure runs.
+
 - **`SLinkClustererV2` logs the full per-cluster size list at INFO** on every
   `cluster()` call (`SLinkClustererV2.java:77-78`): noisy on the SAS-point
   prediction path with many ligandable points. (likely)

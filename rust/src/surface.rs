@@ -43,12 +43,28 @@ pub fn directions(level: i32) -> Result<Directions, String> {
     Ok(d)
 }
 
+/// Point tag: atom index << 10 | direction index (level 4 has 642 directions).
+pub fn tag_dir(tag: u32) -> usize {
+    (tag & 0x3ff) as usize
+}
+
+/// Mask of the `coarse` level directions within the `level` direction list (the icosahedral
+/// tessellations are nested: every level-1 direction is bitwise a level-2 direction).
+pub fn nested_direction_mask(coarse: i32, level: i32) -> Result<Vec<bool>, String> {
+    let c = directions(coarse)?;
+    let d = directions(level)?;
+    Ok((0..d.dx.len())
+        .map(|i| (0..c.dx.len()).any(|j| c.dx[j].to_bits() == d.dx[i].to_bits() && c.dy[j].to_bits() == d.dy[i].to_bits() && c.dz[j].to_bits() == d.dz[i].to_bits()))
+        .collect())
+}
+
 /// Computes SAS points for atoms with given centers and van der Waals radii.
 /// Returns points in atom order, then direction order.
 ///
 /// Each atom's surviving directions depend only on its own neighbor set (all atoms j != i with
 /// d2 < (ri + rj)^2), so atoms are processed in parallel chunks and concatenated in order.
-pub fn compute_surface_points(centers: &[P3], vdw: &[f64], solvent_radius: f64, tess_level: i32, threads: usize) -> Result<Vec<P3>, String> {
+/// Also returns a tag (atom index, direction index) per point.
+pub fn compute_surface_points_tagged(centers: &[P3], vdw: &[f64], solvent_radius: f64, tess_level: i32, threads: usize) -> Result<(Vec<P3>, Vec<u32>), String> {
     let n = centers.len();
     let dirs = directions(tess_level)?;
 
@@ -137,7 +153,7 @@ pub fn compute_surface_points(centers: &[P3], vdw: &[f64], solvent_radius: f64, 
         }
     };
 
-    let atom_points = |i: usize, out: &mut Vec<P3>, nb: &mut Vec<(f64, f64, f64, f64)>| {
+    let atom_points = |i: usize, out: &mut Vec<P3>, tags: &mut Vec<u32>, nb: &mut Vec<(f64, f64, f64, f64)>| {
         let total_radius = radius[i];
         let total_radius2 = radius2[i];
         let twice = 2.0 * total_radius;
@@ -177,6 +193,7 @@ pub fn compute_surface_points(centers: &[P3], vdw: &[f64], solvent_radius: f64, 
             }
             if !buried {
                 out.push([total_radius * px + ax, total_radius * py + ay, total_radius * pz + az]);
+                tags.push((i as u32) << 10 | d as u32);
             }
         }
     };
@@ -184,28 +201,31 @@ pub fn compute_surface_points(centers: &[P3], vdw: &[f64], solvent_radius: f64, 
     let threads = threads.max(1).min(n.div_ceil(1024).max(1));
     if threads <= 1 {
         let mut out = Vec::with_capacity(n * 8);
+        let mut tags = Vec::with_capacity(n * 8);
         let mut nb = Vec::new();
         for i in 0..n {
-            atom_points(i, &mut out, &mut nb);
+            atom_points(i, &mut out, &mut tags, &mut nb);
         }
-        return Ok(out);
+        return Ok((out, tags));
     }
     let chunk = n.div_ceil(threads);
-    let parts: Vec<Vec<P3>> = std::thread::scope(|sc| {
+    let parts: Vec<(Vec<P3>, Vec<u32>)> = std::thread::scope(|sc| {
         let handles: Vec<_> = (0..threads)
             .map(|t| {
                 let atom_points = &atom_points;
                 sc.spawn(move || {
                     let mut out = Vec::new();
+                    let mut tags = Vec::new();
                     let mut nb = Vec::new();
                     for i in t * chunk..((t + 1) * chunk).min(n) {
-                        atom_points(i, &mut out, &mut nb);
+                        atom_points(i, &mut out, &mut tags, &mut nb);
                     }
-                    out
+                    (out, tags)
                 })
             })
             .collect();
         handles.into_iter().map(|h| h.join().unwrap()).collect()
     });
-    Ok(parts.concat())
+    let (pts, tags): (Vec<Vec<P3>>, Vec<Vec<u32>>) = parts.into_iter().unzip();
+    Ok((pts.concat(), tags.concat()))
 }

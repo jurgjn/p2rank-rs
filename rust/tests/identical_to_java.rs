@@ -49,16 +49,16 @@ fn outputs_identical_to_java() {
     assert!(n > 0);
 }
 
-/// `-mode fast` is approximate: check that it agrees closely with the Java output on 1fbl
-/// (same pockets at the same places, residue scores close).
-#[test]
-fn fast_mode_close_to_java() {
+/// Runs `prank-rs predict -mode <mode>` on 1fbl; returns (expected, got) rows of the
+/// predictions and residues CSV files.
+type Rows = Vec<Vec<String>>;
+fn run_1fbl(mode: &str) -> ((Rows, Rows), (Rows, Rows)) {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let case = root.join("tests").join("cases").join("1fbl.pdb");
-    let out = std::env::temp_dir().join(format!("prank-rs-test-fast-{}", std::process::id()));
+    let out = std::env::temp_dir().join(format!("prank-rs-test-{}-{}", mode, std::process::id()));
     let _ = std::fs::remove_dir_all(&out);
     let status = std::process::Command::new(env!("CARGO_BIN_EXE_prank-rs"))
-        .args(["predict", "-mode", "fast", "-f"])
+        .args(["predict", "-mode", mode, "-f"])
         .arg(case.join("1fbl.pdb"))
         .arg("-o")
         .arg(&out)
@@ -67,22 +67,51 @@ fn fast_mode_close_to_java() {
         .status()
         .expect("run prank-rs");
     assert!(status.success());
-    let rows = |text: String| -> Vec<Vec<String>> {
-        text.lines().skip(1).map(|l| l.split(',').map(|c| c.trim().to_string()).collect()).collect()
-    };
-    let exp = rows(std::fs::read_to_string(case.join("expected_1fbl.pdb_predictions.csv")).unwrap());
-    let got = rows(std::fs::read_to_string(out.join("1fbl.pdb_predictions.csv")).unwrap());
+    let rows = |text: String| -> Rows { text.lines().skip(1).map(|l| l.split(',').map(|c| c.trim().to_string()).collect()).collect() };
+    let read = |dir: &std::path::Path, name: &str| rows(std::fs::read_to_string(dir.join(name)).unwrap());
+    let res = (
+        (read(&case, "expected_1fbl.pdb_predictions.csv"), read(&out, "1fbl.pdb_predictions.csv")),
+        (read(&case, "expected_1fbl.pdb_residues.csv"), read(&out, "1fbl.pdb_residues.csv")),
+    );
+    let _ = std::fs::remove_dir_all(&out);
+    res
+}
+
+fn center_dist(e: &[String], g: &[String]) -> f64 {
+    (6..9).map(|k| (e[k].parse::<f64>().unwrap() - g[k].parse::<f64>().unwrap()).powi(2)).sum::<f64>().sqrt()
+}
+
+fn residue_diffs(exp: &Rows, got: &Rows) -> Vec<f64> {
+    assert_eq!(exp.len(), got.len());
+    exp.iter().zip(got).map(|(e, g)| (e[3].parse::<f64>().unwrap() - g[3].parse::<f64>().unwrap()).abs()).collect()
+}
+
+/// `-mode fast` is approximate: check that it agrees closely with the Java output on 1fbl
+/// (same pockets at the same places, residue scores close).
+#[test]
+fn fast_mode_close_to_java() {
+    let ((exp, got), (exp_r, got_r)) = run_1fbl("fast");
     assert_eq!(exp.len(), got.len(), "pocket count");
     for (e, g) in exp.iter().zip(&got) {
-        let d: f64 = (6..9).map(|k| (e[k].parse::<f64>().unwrap() - g[k].parse::<f64>().unwrap()).powi(2)).sum::<f64>().sqrt();
+        let d = center_dist(e, g);
         assert!(d < 1.0, "pocket {} center moved by {} A", e[0], d);
     }
-    let exp = rows(std::fs::read_to_string(case.join("expected_1fbl.pdb_residues.csv")).unwrap());
-    let got = rows(std::fs::read_to_string(out.join("1fbl.pdb_residues.csv")).unwrap());
-    assert_eq!(exp.len(), got.len());
-    for (e, g) in exp.iter().zip(&got) {
-        let d = (e[3].parse::<f64>().unwrap() - g[3].parse::<f64>().unwrap()).abs();
+    for (e, d) in exp_r.iter().zip(residue_diffs(&exp_r, &got_r)) {
         assert!(d < 0.5, "residue {} score differs by {}", e[1], d);
     }
-    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// `-mode faster` trades accuracy: check that the top pockets are at the same places, the pocket
+/// count is about the same and residue scores are close on average.
+#[test]
+fn faster_mode_close_to_java() {
+    let ((exp, got), (exp_r, got_r)) = run_1fbl("faster");
+    assert!((exp.len() as i64 - got.len() as i64).abs() <= 1, "pocket count {} vs {}", got.len(), exp.len());
+    for (e, g) in exp.iter().zip(&got).take(3) {
+        let d = center_dist(e, g);
+        assert!(d < 2.0, "pocket {} center moved by {} A", e[0], d);
+    }
+    let diffs = residue_diffs(&exp_r, &got_r);
+    let mean = diffs.iter().sum::<f64>() / diffs.len() as f64;
+    assert!(mean < 0.1, "mean residue score difference {}", mean);
 }
