@@ -89,6 +89,19 @@ impl Forest {
         Ok(())
     }
 
+    /// Re-indexes the split attributes: `map[i]` is the feature vector index of model attribute `i`
+    /// (for models trained on a subset of the computed features, e.g. `alphafold` without `bfactor`).
+    pub fn remap_attributes(&mut self, map: &[usize], num_attributes: usize) -> Result<(), String> {
+        let Storage::Owned { nodes, .. } = &mut self.storage else {
+            return Err("cannot remap the attributes of a memory-mapped model".into());
+        };
+        for nd in nodes.iter_mut() {
+            nd.attr = *map.get(nd.attr as usize).ok_or("invalid forest: attribute index out of range")? as u32;
+        }
+        self.num_attributes = num_attributes;
+        self.validate()
+    }
+
     /// Loads the `model.flb` cache (memory mapped).
     pub fn load_flb(path: &Path) -> Result<Forest, String> {
         let file = std::fs::File::open(path).map_err(|e| format!("cannot read model {}: {}", path.display(), e))?;

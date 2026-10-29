@@ -1,6 +1,6 @@
 # prank-rs: P2Rank `predict` in Rust
 
-`prank-rs` is a Rust port of the P2Rank `predict` command (default config, default model).
+`prank-rs` is a Rust port of the P2Rank `predict` command (`default` and `alphafold` configs and models).
 In the default `exact` mode it produces **byte-identical output files** to the Java P2Rank, and is
 25-40x faster for a single structure and 3-10x faster on whole datasets. The optional `fast` mode
 is another 1.5-1.7x faster on datasets, with documented differences far below P2Rank's own
@@ -30,8 +30,12 @@ prank-rs convert-model [<model_dir>]
 * Dataset files (`.ds`) are read like P2Rank does: `#` comments, `PARAM.` lines, `HEADER:` columns.
   The `chains` column is supported; other columns (ligands, predictions) do not affect `predict`.
 * The default output directory is `<P2RANK_HOME>/test_output/predict_<name>`, as in P2Rank.
-* `-c default` and `-m default` are accepted; any other config, model or parameter is rejected
-  rather than silently giving different results.
+* `-c default` (the default) and `-c alphafold` are accepted, and `-m` naming the config's own
+  model. `alphafold` is P2Rank's config for AlphaFold, cryo-EM and NMR models: the same features
+  without `bfactor` (which holds pLDDT in AlphaFold models), with its own model and score
+  transformers. Output is byte-identical to Java P2Rank `-c alphafold` (200 AlphaFold DB v6 human
+  models, 150 `.cif.gz` and 50 `.pdb.gz`: 1201 of 1201 files identical). Any other config, model
+  or parameter is rejected rather than silently giving different results.
 
 > [!TIP]
 > The first run converts `models/default/model.zst` (zstd-compressed Java serialization) to
@@ -290,8 +294,8 @@ programs in `tools/java/` (run against the P2Rank classpath).
 
 ## Limitations
 
-* Only `predict` with the default config and model (`models/default`). No `rescore`,
-  `eval-*`, training, conservation or AlphaFold-specific configs.
+* Only `predict` with the `default` and `alphafold` configs and models. No `rescore`,
+  `eval-*`, training or conservation configs.
 * PDB files with more than 500,000 atoms (where BioJava switches to CA-only parsing) and
   `.lzma` input are rejected.
 * Number formatting assumes the `en_US` locale, which P2Rank forces at start-up.

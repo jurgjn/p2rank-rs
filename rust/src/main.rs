@@ -1,4 +1,4 @@
-//! prank-rs: a Rust port of the P2Rank `predict` command (default config and model)
+//! prank-rs: a Rust port of the P2Rank `predict` command (default and alphafold configs and models)
 //! that produces output identical to the Java implementation.
 
 mod atoms;
@@ -63,12 +63,15 @@ fn parse_stages(s: &str) -> Vec<(usize, f64)> {
 
 fn usage() -> ! {
     eprintln!(
-        "prank-rs {VERSION} - Rust port of P2Rank `predict` (default model)
+        "prank-rs {VERSION} - Rust port of P2Rank `predict` (default and alphafold models)
 
 usage:
-  prank-rs predict -f <structure> [-o <outdir>] [-mode exact|fast|faster] [-threads <n>] [-visualizations 0|1] [-descriptors 0|1] [-ccd reduced|full]
-  prank-rs predict <dataset.ds>  [-o <outdir>] [-mode exact|fast|faster] [-threads <n>] [-visualizations 0|1] [-descriptors 0|1] [-ccd reduced|full]
+  prank-rs predict -f <structure> [-o <outdir>] [-c default|alphafold] [-mode exact|fast|faster] [-threads <n>] [-visualizations 0|1] [-descriptors 0|1] [-ccd reduced|full]
+  prank-rs predict <dataset.ds>  [-o <outdir>] [-c default|alphafold] [-mode exact|fast|faster] [-threads <n>] [-visualizations 0|1] [-descriptors 0|1] [-ccd reduced|full]
 
+  -c default|alphafold
+                      config and model: default, or alphafold (for AlphaFold, cryo-EM and NMR
+                      models; same features without bfactor, which holds pLDDT in AlphaFold models)
   -mode exact|fast|faster
                       exact (default): output byte-identical to Java P2Rank;
                       fast: faster, small documented differences (see README);
@@ -112,8 +115,17 @@ fn find_install_dir() -> Result<PathBuf, String> {
     Err("cannot locate P2Rank installation directory (set P2RANK_HOME)".to_string())
 }
 
-fn load_forest(install_dir: &Path, log: &Log) -> Result<forest::Forest, String> {
-    let dir = install_dir.join("models").join("default");
+/// Configs supported by prank-rs (`-c`); each uses the model of the same name. They differ only in
+/// the model, its features and its score transformers.
+const CONFIGS: [&str; 2] = ["default", "alphafold"];
+
+/// Parses a `-c` value (`alphafold`, `alphafold.groovy`, `.../config/alphafold.groovy`).
+fn parse_config(v: &str) -> Option<&'static str> {
+    CONFIGS.iter().copied().find(|c| v == *c || v == format!("{}.groovy", c) || v.ends_with(&format!("config/{}.groovy", c)))
+}
+
+fn load_forest(install_dir: &Path, model: &str, log: &Log) -> Result<forest::Forest, String> {
+    let dir = install_dir.join("models").join(model);
     log.info("Model", &format!("Loading model from directory (v3 format): {}", dir.display()));
     let flb = dir.join("model.flb");
     let zst = dir.join("model.zst");
@@ -130,7 +142,7 @@ fn load_forest(install_dir: &Path, log: &Log) -> Result<forest::Forest, String> 
             }
         }
     }
-    let f = javaser::load_legacy_flat_forest_zst(&zst)?;
+    let f = load_forest_zst(&dir)?;
     // best effort: write the fast-loading cache next to the model (ignored if not writable)
     if f.write_flb(&flb).is_ok() {
         log.info("Model", &format!("model cache written to {}", flb.display()));
@@ -138,18 +150,39 @@ fn load_forest(install_dir: &Path, log: &Log) -> Result<forest::Forest, String> 
     Ok(f)
 }
 
-fn check_model_features(install_dir: &Path) -> Result<(), String> {
-    let path = install_dir.join("models").join("default").join("features.txt");
-    if let Ok(text) = std::fs::read_to_string(&path) {
-        let header: Vec<&str> = text.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
-        if header != features::FEATURE_HEADER.to_vec() {
-            return Err(format!("model feature header {} does not match the features computed by prank-rs", path.display()));
-        }
+/// Loads `model.zst` and maps its attributes to the feature vector computed by prank-rs.
+fn load_forest_zst(dir: &Path) -> Result<forest::Forest, String> {
+    let mut f = javaser::load_legacy_flat_forest_zst(&dir.join("model.zst"))?;
+    if let Some(map) = model_feature_map(dir)? {
+        f.remap_attributes(&map, features::NUM_FEATURES + 1)?;
     }
-    Ok(())
+    Ok(f)
 }
 
-fn load_transformers(install_dir: &Path) -> predict::Transformers {
+/// Reads the model's `features.txt`. Returns None if it lists exactly the features computed by
+/// prank-rs, else the feature vector index of each model feature (a model can use a subset, like
+/// `alphafold`, which has no `bfactor`).
+fn model_feature_map(dir: &Path) -> Result<Option<Vec<usize>>, String> {
+    let path = dir.join("features.txt");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Ok(None);
+    };
+    let header: Vec<&str> = text.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
+    if header == features::FEATURE_HEADER.to_vec() {
+        return Ok(None);
+    }
+    let map = header
+        .iter()
+        .map(|h| features::FEATURE_HEADER.iter().position(|f| f == h))
+        .collect::<Option<Vec<usize>>>()
+        .ok_or_else(|| format!("model feature header {} does not match the features computed by prank-rs", path.display()))?;
+    if map.windows(2).any(|w| w[0] >= w[1]) {
+        return Err(format!("model feature header {} is not in prank-rs feature order", path.display()));
+    }
+    Ok(Some(map))
+}
+
+fn load_transformers(install_dir: &Path, model: &str) -> predict::Transformers {
     let st = install_dir.join("models").join("_score_transform");
     let load = |p: PathBuf| match predict::ScoreTransformer::load(&p) {
         Ok(t) => Some(t),
@@ -159,10 +192,10 @@ fn load_transformers(install_dir: &Path) -> predict::Transformers {
         }
     };
     predict::Transformers {
-        zscore: load(st.join("default_ZscoreTpTransformer.json")),
-        proba: load(st.join("default_ProbabilityScoreTransformer.json")),
-        res_zscore: load(st.join("residue").join("default_ZscoreTpTransformer.json")),
-        res_proba: load(st.join("residue").join("default_ProbabilityScoreTransformer.json")),
+        zscore: load(st.join(format!("{}_ZscoreTpTransformer.json", model))),
+        proba: load(st.join(format!("{}_ProbabilityScoreTransformer.json", model))),
+        res_zscore: load(st.join("residue").join(format!("{}_ZscoreTpTransformer.json", model))),
+        res_proba: load(st.join("residue").join(format!("{}_ProbabilityScoreTransformer.json", model))),
     }
 }
 
@@ -218,7 +251,7 @@ fn git_head() -> Option<String> {
     }
 }
 
-fn params_txt(install_dir: &Path, threads: usize, visualizations: bool, git: Option<String>) -> String {
+fn params_txt(install_dir: &Path, model: &str, threads: usize, visualizations: bool, git: Option<String>) -> String {
     let mut v = format!("version: {}\n", VERSION);
     if let Some(g) = git {
         v.push_str(&format!("git head: {}\n", g));
@@ -231,6 +264,13 @@ fn params_txt(install_dir: &Path, threads: usize, visualizations: bool, git: Opt
         .replace("{THREADS}", &threads.to_string());
     if !visualizations {
         body = body.replace("  visualizations = true\n", "  visualizations = false\n");
+    }
+    if model == "alphafold" {
+        body = body
+            .replace("  features = [chem, volsite, protrusion, bfactor]\n", "  features = [chem, volsite, protrusion]\n")
+            .replace("  model = default\n", "  model = alphafold\n")
+            .replace("_score_transform/default_", "_score_transform/alphafold_")
+            .replace("_score_transform/residue/default_", "_score_transform/residue/alphafold_");
     }
     v + &body
 }
@@ -251,6 +291,8 @@ fn run_predict(args: &[String]) -> Result<(), String> {
     let mut full_ccd = false;
     let mut descriptors = false;
     let mut mode = "exact".to_string();
+    let mut config = "default";
+    let mut model_arg: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
         let a = args[i].as_str();
@@ -282,15 +324,11 @@ fn run_predict(args: &[String]) -> Result<(), String> {
             }
             "-c" => {
                 let v = val()?;
-                if v != "default" && v != "default.groovy" && !v.ends_with("config/default.groovy") {
-                    return Err(format!("only the default config is supported by prank-rs (got -c {})", v));
-                }
+                config = parse_config(&v)
+                    .ok_or_else(|| format!("only the configs {} are supported by prank-rs (got -c {})", CONFIGS.join(", "), v))?;
             }
             "-m" => {
-                let v = val()?;
-                if v != "default" {
-                    return Err(format!("only the default model is supported by prank-rs (got -m {})", v));
-                }
+                model_arg = Some(val()?);
             }
             _ if a.starts_with('-') => return Err(format!("unsupported option: {}", a)),
             _ => {
@@ -300,6 +338,13 @@ fn run_predict(args: &[String]) -> Result<(), String> {
             }
         }
         i += 2;
+    }
+    // a config uses the model of the same name; -m may only restate it
+    let model = config;
+    if let Some(m) = &model_arg {
+        if m != model {
+            return Err(format!("-c {} uses the model {} (got -m {})", config, model, m));
+        }
     }
     let fast = mode == "fast" || mode == "faster";
     let faster = if mode == "faster" {
@@ -352,14 +397,15 @@ fn run_predict(args: &[String]) -> Result<(), String> {
         std::fs::create_dir_all(outdir.join("visualizations")).map_err(|e| e.to_string())?;
     }
 
-    check_model_features(&install_dir)?;
+    model_feature_map(&install_dir.join("models").join(model))?;
     let t0 = Instant::now();
-    let forest = load_forest(&install_dir, &log)?;
+    let forest = load_forest(&install_dir, model, &log)?;
     if std::env::var("P2RS_TIMING").is_ok() {
         eprintln!("timing: model load {:?}", t0.elapsed());
     }
-    log.info("FeatureSetup", "effectively enabled features: [chem, volsite, protrusion, bfactor, atom_table]");
-    let tr = load_transformers(&install_dir);
+    let enabled = if model == "alphafold" { "chem, volsite, protrusion" } else { "chem, volsite, protrusion, bfactor" };
+    log.info("FeatureSetup", &format!("effectively enabled features: [{}, atom_table]", enabled));
+    let tr = load_transformers(&install_dir, model);
     let cfg = Config { install_dir: install_dir.clone(), threads, visualizations, full_ccd, rf_stages: rf_stages.clone(), fast, faster: faster.clone(), descriptors };
 
     log.info("Dataset", &format!("processing dataset [{}] using {} threads", ds_name, threads));
@@ -398,7 +444,7 @@ fn run_predict(args: &[String]) -> Result<(), String> {
         eprintln!("timing: items done {:?}", start.elapsed());
     }
     let git = git_thread.join().unwrap_or(None);
-    std::fs::write(outdir.join("params.txt"), params_txt(&install_dir, threads, visualizations, git))
+    std::fs::write(outdir.join("params.txt"), params_txt(&install_dir, model, threads, visualizations, git))
         .map_err(|e| format!("cannot write params.txt: {}", e))?;
     log.info("Writable", &format!("predicting pockets finished in {}", format_time(start.elapsed().as_millis())));
     let abs_out = std::fs::canonicalize(&outdir).unwrap_or(outdir.clone());
@@ -459,7 +505,7 @@ fn run_convert_model(args: &[String]) -> Result<(), String> {
         Some(d) => PathBuf::from(d),
         None => find_install_dir()?.join("models").join("default"),
     };
-    let f = javaser::load_legacy_flat_forest_zst(&dir.join("model.zst"))?;
+    let f = load_forest_zst(&dir)?;
     let out = dir.join("model.flb");
     f.write_flb(&out).map_err(|e| format!("cannot write {}: {}", out.display(), e))?;
     println!("written {}", out.display());
